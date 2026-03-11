@@ -138,8 +138,8 @@ with st.sidebar:
     cam_name = st.text_input("Display Name", "Camera 1")
     
     # Available AI Modules
-    module_opts = ["object_detector", "face_recognition", "pose", "motion", "weapon"]
-    selected_modules = st.multiselect("AI Modules", module_opts, default=["object_detector", "motion"])
+    module_opts = ["object_detector", "reid_tracking", "face_recognition", "pose", "motion", "weapon"]
+    selected_modules = st.multiselect("AI Modules", module_opts, default=["object_detector", "reid_tracking", "motion"])
     
     if source_type == "URL / RTSP / Webcam":
         cam_url = st.text_input("Stream URL (e.g. 0 for webcam, rtsp://...)", "0")

@@ -11,3 +11,6 @@ python-multipart
 pydantic
 filterpy
 lapx
+
+torchvision
+scipy

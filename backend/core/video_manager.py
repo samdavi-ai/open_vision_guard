@@ -10,6 +10,7 @@ from ai.face_recognizer import FaceRecognizer
 from ai.pose_estimator import PoseEstimator
 from ai.motion_detector import MotionDetector
 from ai.weapon_detector import WeaponDetector
+from ai.reid_tracker import ReIDTracker
 
 class VideoManager:
     def __init__(self, ws_manager):
@@ -23,6 +24,8 @@ class VideoManager:
         self.pose_estimator = PoseEstimator()
         self.motion_detector = MotionDetector()
         self.weapon_detector = WeaponDetector()
+        # Single global tracker for cross-camera subjects
+        self.reid_tracker = ReIDTracker()
 
     def start_stream(self, camera_id: str, url: str, modules: List[str]):
         """
@@ -73,8 +76,14 @@ class VideoManager:
             if "object_detector" in config["modules"]:
                 results = self.object_detector.track(annotated_frame)
                 annotated_frame = self.object_detector.draw_results(annotated_frame, results)
-                # Parse alerts (could count persons, vehicles, etc)
-            
+
+            # 1.5 Re-ID Tracking
+            if "reid_tracking" in config["modules"]:
+                # Require tracking IDs
+                results = self.object_detector.track(annotated_frame)
+                annotated_frame, reid_alerts = self.reid_tracker.process_frame_tracking(annotated_frame.copy(), [results])
+                alerts.extend(reid_alerts)
+                
             # 2. Face Recognition
             if "face_recognition" in config["modules"]:
                 annotated_frame, face_names = self.face_recognizer.detect_and_recognize(annotated_frame)
