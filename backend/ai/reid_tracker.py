@@ -1,40 +1,33 @@
 import cv2
-import torch
-import torchvision.transforms as T
-from torchvision.models import resnet18, ResNet18_Weights
 import numpy as np
+from scipy.spatial.distance import cosine
 
 class ReIDTracker:
     def __init__(self, similarity_threshold=0.85, device='cpu'):
-        self.device = device
         self.similarity_threshold = similarity_threshold
+        # Note: device arg kept for compatibility with detect.py API, but histograms run efficiently on CPU via OpenCV
         
-        # Load feature extractor model
-        weights = ResNet18_Weights.IMAGENET1K_V1
-        model = resnet18(weights=weights)
-        self.model = torch.nn.Sequential(*(list(model.children())[:-1]))
-        self.model = self.model.to(self.device)
-        self.model.eval()
-        
-        self.transforms = T.Compose([
-            T.ToPILImage(),
-            T.Resize((224, 224)),
-            T.ToTensor(),
-            T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-        ])
-        
-        self.global_subjects = {} # global_id -> {'features':[], 'avg_feature': tensor}
+        self.global_subjects = {} # global_id -> {'features':[], 'avg_feature': ndarray}
         self.session_locks = {}   # local_track_id -> global_id
         self.next_subject_id = 1
         
     def extract_feature(self, frame_crop):
         try:
-            tensor = self.transforms(frame_crop).unsqueeze(0).to(self.device)
-            with torch.no_grad():
-                feat = self.model(tensor).flatten()
-                # Normalize the feature vector
-                feat = feat / feat.norm(p=2, dim=0, keepdim=True)
-            return feat
+            # Advanced Feature Matching: 3D Color Histograms in HSV space
+            hsv = cv2.cvtColor(frame_crop, cv2.COLOR_BGR2HSV)
+            
+            # Using 8 bins per channel -> 8x8x8 = 512 dimensional feature vector
+            hist = cv2.calcHist([hsv], [0, 1, 2], None, [8, 8, 8], [0, 180, 0, 256, 0, 256])
+            
+            # Normalize and flatten
+            cv2.normalize(hist, hist)
+            feat = hist.flatten()
+            
+            # To avoid divide by zero later, add tiny epsilon
+            norm = np.linalg.norm(feat)
+            if norm == 0:
+                return None
+            return feat / norm
         except Exception as e:
             return None
             
@@ -44,7 +37,10 @@ class ReIDTracker:
         
         for subj_id, data in self.global_subjects.items():
             avg_feat = data['avg_feature']
-            sim = torch.nn.functional.cosine_similarity(feature.unsqueeze(0), avg_feat.unsqueeze(0)).item()
+            # Cosine distance returns 1 - cosine similarity
+            # So similarity = 1 - distance
+            sim = 1.0 - cosine(feature, avg_feat)
+            
             if sim > best_sim:
                 best_sim = sim
                 best_match = subj_id
@@ -58,10 +54,15 @@ class ReIDTracker:
             self.global_subjects[subj_id] = {'features': [feature], 'avg_feature': feature}
         else:
             self.global_subjects[subj_id]['features'].append(feature)
-            # Temporal averaging (running average of last 10 features)
+            # Temporal averaging (running average of last 10 features to smooth lighting changes)
             recent_feats = self.global_subjects[subj_id]['features'][-10:]
-            avg_feat = torch.stack(recent_feats).mean(dim=0)
-            avg_feat = avg_feat / avg_feat.norm(p=2, dim=0, keepdim=True)
+            avg_feat = np.mean(recent_feats, axis=0)
+            
+            # Re-normalize
+            norm = np.linalg.norm(avg_feat)
+            if norm > 0:
+                avg_feat = avg_feat / norm
+                
             self.global_subjects[subj_id]['avg_feature'] = avg_feat
 
     def process_frame_tracking(self, frame, yolo_results):
@@ -82,24 +83,25 @@ class ReIDTracker:
                 
             x1, y1, x2, y2 = map(int, box)
             
-            # Ensure valid box
+            # Ensure valid box bounds
+            x1, y1 = max(0, x1), max(0, y1)
+            x2, y2 = min(frame.shape[1], x2), min(frame.shape[0], y2)
             if x2 <= x1 or y2 <= y1:
                 continue
                 
-            # If already locked, just periodically average features
+            crop = frame[y1:y2, x1:x2]
+            if crop.size == 0:
+                continue
+
+            # Stable Identity Locking
             if track_id in self.session_locks:
                 global_id = self.session_locks[track_id]
-                crop = frame[max(0, y1):min(frame.shape[0], y2), max(0, x1):min(frame.shape[1], x2)]
-                if crop.size > 0:
-                    feat = self.extract_feature(crop)
-                    if feat is not None:
-                        self.register_feature(global_id, feat)
+                # Periodically extract & temporal average features to adapt to lighting
+                feat = self.extract_feature(crop)
+                if feat is not None:
+                    self.register_feature(global_id, feat)
             else:
                 # Need to run Re-ID for this new local track
-                crop = frame[max(0, y1):min(frame.shape[0], y2), max(0, x1):min(frame.shape[1], x2)]
-                if crop.size == 0:
-                    continue
-                    
                 feat = self.extract_feature(crop)
                 if feat is None:
                     continue
@@ -121,6 +123,8 @@ class ReIDTracker:
             # Draw on frame
             global_id = self.session_locks.get(track_id, "Unknown")
             cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), (255, 0, 0), 2)
-            cv2.putText(annotated_frame, global_id, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 0, 0), 2)
+            # Add a slight background for readable text
+            cv2.rectangle(annotated_frame, (x1, y1-25), (x1 + 120, y1), (255, 0, 0), -1)
+            cv2.putText(annotated_frame, global_id, (x1 + 5, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
             
         return annotated_frame, alerts
