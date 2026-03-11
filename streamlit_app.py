@@ -10,8 +10,7 @@ import time
 
 # --- Configuration ---
 API_URL = "http://localhost:8000/api"
-WS_URL = "ws://localhost:8000/ws/video"
-ALERTS_WS_URL = "ws://localhost:8000/ws/alerts"
+WS_URL = "ws://localhost:8000/ws"
 
 st.set_page_config(
     page_title="OpenVisionGuard",
@@ -24,13 +23,14 @@ st.set_page_config(
 st.markdown("""
 <style>
     .alert-box {
-        padding: 10px;
+        padding: 5px 10px;
         border-radius: 5px;
-        margin-bottom: 10px;
+        margin-bottom: 5px;
         background-color: #2c0b0e;
         border: 1px solid #842029;
         color: #ea868f;
         font-family: monospace;
+        font-size: 0.8em;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -106,6 +106,18 @@ def on_video_message(ws, message):
         img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
         img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         st.session_state.images[cam_id] = img_rgb
+        
+        # Handle embedded alerts
+        if 'alerts' in data and data['alerts']:
+            for alert_text in data['alerts']:
+                st.session_state.alerts.insert(0, {
+                    "module": "AI DETECT",
+                    "message": alert_text,
+                    "timestamp": time.strftime('%H:%M:%S')
+                })
+            # Keep only the last 50
+            st.session_state.alerts = st.session_state.alerts[:50]
+            
     except Exception as e:
         pass
 
@@ -115,27 +127,6 @@ def start_video_thread(cam_id):
         ws.run_forever()
     thread = threading.Thread(target=run, daemon=True)
     thread.start()
-
-def on_alert_message(ws, message):
-    try:
-        data = json.loads(message)
-        # Add to beginning of list and keep last 50
-        st.session_state.alerts.insert(0, data)
-        st.session_state.alerts = st.session_state.alerts[:50]
-    except Exception as e:
-        pass
-
-def start_alerts_thread():
-    def run():
-        ws = websocket.WebSocketApp(ALERTS_WS_URL, on_message=on_alert_message)
-        ws.run_forever()
-    thread = threading.Thread(target=run, daemon=True)
-    thread.start()
-
-# Start global alerts thread if not started
-if 'alerts_thread_started' not in st.session_state:
-    start_alerts_thread()
-    st.session_state.alerts_thread_started = True
 
 # --- Sidebar UI ---
 with st.sidebar:

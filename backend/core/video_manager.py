@@ -45,7 +45,7 @@ class VideoManager:
         config = self.configs[camera_id]
         url = config["url"]
         
-        # Handle webcam vs RTSP
+        # Handle webcam vs RTSP / file
         if url.isdigit():
             cap = cv2.VideoCapture(int(url))
         else:
@@ -56,9 +56,15 @@ class VideoManager:
         while config["running"]:
             ret, frame = cap.read()
             if not ret:
-                print(f"Failed to read from {camera_id}. Retrying...")
-                time.sleep(1)
-                continue
+                # If it's a file, loop it. Assume non-digit URLs are files/RTSP
+                if not str(url).isdigit() and cap.isOpened():
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                    ret, frame = cap.read()
+                    
+                if not ret:
+                    print(f"Failed to read from {camera_id}. Retrying...")
+                    time.sleep(1)
+                    continue
                 
             annotated_frame = frame.copy()
             alerts = []
