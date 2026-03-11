@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import CameraGrid from './components/CameraGrid.jsx';
 import AlertSidebar from './components/AlertSidebar.jsx';
-import { Shield, Settings, activity } from 'lucide-react';
+import { Shield, Settings, Activity } from 'lucide-react';
 
 function App() {
   const [cameras, setCameras] = useState([]);
