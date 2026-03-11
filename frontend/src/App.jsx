@@ -1,11 +1,13 @@
 import { useState, useEffect } from 'react';
 import CameraGrid from './components/CameraGrid.jsx';
 import AlertSidebar from './components/AlertSidebar.jsx';
+import AddCameraModal from './components/AddCameraModal.jsx';
 import { Shield, Settings, Activity } from 'lucide-react';
 
 function App() {
   const [cameras, setCameras] = useState([]);
   const [alerts, setAlerts] = useState([]);
+  const [isModalOpen, setIsModalOpen] = useState(false);
   
   // Backend config
   const API_URL = "http://localhost:8000/api";
@@ -25,19 +27,25 @@ function App() {
     // In a real scenario we'd poll or use a global SSE/WS for config changes
   }, []);
 
-  const addTestCamera = async () => {
-    const newCam = {
-      id: `cam_${Date.now()}`,
-      url: "d:\\firsttask_pon\\OpenVisionGuard\\test_video.mp4", // Test video instead of webcam
-      name: `Webcam ${cameras.length + 1}`,
-      modules: ["object_detector", "face_recognition", "pose", "motion"]
-    };
-    await fetch(`${API_URL}/cameras`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(newCam)
-    });
-    fetchCameras();
+  const handleAddCamera = async (data, isUpload) => {
+    try {
+      if (isUpload) {
+        await fetch(`${API_URL}/cameras/upload`, {
+          method: "POST",
+          body: data // FormData handles its own headers
+        });
+      } else {
+        await fetch(`${API_URL}/cameras`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(data)
+        });
+      }
+      fetchCameras();
+    } catch (err) {
+      console.error("Failed to add camera:", err);
+      alert("Error adding camera source. Check connection.");
+    }
   };
 
   return (
@@ -68,7 +76,7 @@ function App() {
           </div>
           <div className="flex items-center gap-4">
             <button 
-              onClick={addTestCamera}
+              onClick={() => setIsModalOpen(true)}
               className="px-4 py-2 bg-primary/10 border border-primary/30 text-primary rounded text-sm font-medium hover:bg-primary/20 transition flex items-center gap-2">
               <span>+ Add Camera Stream</span>
             </button>
@@ -98,6 +106,13 @@ function App() {
 
       {/* Alerts Sidebar */}
       <AlertSidebar alerts={alerts} />
+      
+      {/* Modals */}
+      <AddCameraModal 
+        isOpen={isModalOpen} 
+        onClose={() => setIsModalOpen(false)} 
+        onAdd={handleAddCamera} 
+      />
       
     </div>
   )
