@@ -1,0 +1,13 @@
+fastapi
+uvicorn
+opencv-python
+ultralytics
+torch
+torchvision
+mediapipe
+numpy
+websockets
+python-multipart
+pydantic
+filterpy
+lapx
