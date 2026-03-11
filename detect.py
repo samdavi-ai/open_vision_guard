@@ -8,8 +8,12 @@ sys.path.append(os.path.join(os.path.dirname(__file__), 'backend'))
 
 from ultralytics import YOLO
 from ai.reid_tracker import ReIDTracker
+from ai.face_recognizer import FaceRecognizer
+from ai.pose_estimator import PoseEstimator
+from ai.motion_detector import MotionDetector
+from ai.weapon_detector import WeaponDetector
 
-def process_source(source_path, output_path, model, tracker):
+def process_source(source_path, output_path, model, tracker, face_rec, pose_est, motion_det, weapon_det):
     is_webcam = str(source_path) == "0"
     
     cap = cv2.VideoCapture(int(source_path) if is_webcam else source_path)
@@ -30,8 +34,6 @@ def process_source(source_path, output_path, model, tracker):
 
     print(f"Processing {source_path}...")
     
-    # In live tracking, we clear session locks if we want distinct videos to share IDs but not tracks 
-    # But for a single detect.py run over a folder, we might want to keep the same ReIDTracker instance!
     tracker.session_locks.clear()
 
     while True:
@@ -39,14 +41,45 @@ def process_source(source_path, output_path, model, tracker):
         if not ret:
             break
 
-        # Run YOLO with tracking enabled (BoT-SORT or ByteTrack built into Ultralytics)
+        # Run YOLO Object Detection & Tracking
         results = model.track(frame, persist=True, classes=[0], verbose=False)
+        annotated_frame = results[0].plot()
         
-        # Pass to custom ReID Tracker for global subject matching
-        annotated_frame, alerts = tracker.process_frame_tracking(frame, results)
+        alerts = []
+        
+        # 1. Custom ReID Tracker
+        annotated_frame, reid_alerts = tracker.process_frame_tracking(annotated_frame, results)
+        alerts.extend(reid_alerts)
+
+        # 2. Face Recognition
+        annotated_frame, face_names = face_rec.detect_and_recognize(annotated_frame)
+        for name in face_names:
+            if name != "Unknown":
+                alerts.append(f"Recognized Face: {name}")
+
+        # 3. Pose & Activity
+        annotated_frame, landmarks = pose_est.detect_pose(annotated_frame)
+        activity = pose_est.analyze_activity(landmarks)
+        if activity != "Normal":
+            alerts.append(f"Activity Detected: {activity}")
+            if activity == "Falling":
+                cv2.putText(annotated_frame, "FALL DETECTED!", (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 3)
+
+        # 4. Motion & Anomaly
+        annotated_frame, fg_mask, motion_detected, anomaly = motion_det.detect_motion(annotated_frame)
+        if motion_detected:
+            alerts.append(f"Motion Detected")
+        if anomaly != "None":
+            alerts.append(f"Anomaly: {anomaly}")
+
+        # 5. Weapon Detection
+        annotated_frame, weapons_found = weapon_det.detect_weapon(annotated_frame)
+        for w in weapons_found:
+            alerts.append(f"Weapon Alert: {w['class']} ({w['confidence']:.2f})")
+            cv2.putText(annotated_frame, f"WEAPON DETECTED: {w['class']}", (50, 100), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 3)
 
         for alert in alerts:
-            print(f"[RE-ID ALERT] {alert}")
+            print(f"[ALERT] {alert}")
 
         if out:
             out.write(annotated_frame)
@@ -81,6 +114,10 @@ def main():
     print("Loading models...")
     model = YOLO(args.model)
     tracker = ReIDTracker(similarity_threshold=args.similarity_threshold, device=args.device)
+    face_rec = FaceRecognizer()
+    pose_est = PoseEstimator()
+    motion_det = MotionDetector()
+    weapon_det = WeaponDetector()
 
     # Process based on input type
     if os.path.isdir(args.input):
@@ -94,12 +131,12 @@ def main():
         for file in files:
             in_path = os.path.join(args.input, file)
             out_path = os.path.join(args.output, f"annotated_{file}")
-            process_source(in_path, out_path, model, tracker)
+            process_source(in_path, out_path, model, tracker, face_rec, pose_est, motion_det, weapon_det)
     else:
         # Single file or webcam
         out_name = "annotated_live.mp4" if args.input == "0" else f"annotated_{os.path.basename(args.input)}"
         out_path = os.path.join(args.output, out_name)
-        process_source(args.input, out_path, model, tracker)
+        process_source(args.input, out_path, model, tracker, face_rec, pose_est, motion_det, weapon_det)
 
     print("Done!")
 
