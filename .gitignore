@@ -1,0 +1,26 @@
+# AI Models
+*.pt
+*.pkl
+
+# Videos & Results
+*.mp4
+*.avi
+*.mov
+*.mkv
+test_results/
+outputs/
+test2vid.mp4
+test4video.mp4
+vid3test.mp4
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+env/
+venv/
+ENV/
+
+# Database
+*.db
