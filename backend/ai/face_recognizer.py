@@ -14,6 +14,9 @@ class FaceRecognizer:
         self.known_face_encodings = []
         self.known_face_names = []
         
+        self.last_face_locations = []
+        self.last_face_names = []
+        
         if not HAS_FACE_RECOGNITION:
             print("Warning: face_recognition module not installed. Face recognition will be disabled.")
             return
@@ -24,7 +27,7 @@ class FaceRecognizer:
 
     def load_known_faces(self):
         """
-        Loads all faces from the `faces/` directory.
+        Loads and encodes all faces from the `faces/` directory.
         Folder structure should be:
         faces/
           sam/
@@ -33,6 +36,11 @@ class FaceRecognizer:
             john1.jpg
         """
         if not HAS_FACE_RECOGNITION: return
+        if not os.path.exists(self.faces_dir):
+            print(f"Faces directory {self.faces_dir} not found.")
+            return
+            
+        print(f"Indexing faces in {self.faces_dir}...")
         for root, dirs, files in os.walk(self.faces_dir):
             for file in files:
                 if file.endswith((".jpg", ".jpeg", ".png")):
@@ -41,13 +49,19 @@ class FaceRecognizer:
                     name = os.path.basename(root)
                     
                     try:
+                        # Load image and find encodings
                         image = face_recognition.load_image_file(path)
-                        encodings = face_recognition.face_encodings(image)
-                        if encodings:
+                        # Perform jittering for higher accuracy (multi-sample averaging)
+                        encodings = face_recognition.face_encodings(image, num_jitters=10, model="large")
+                        
+                        if len(encodings) > 0:
                             self.known_face_encodings.append(encodings[0])
                             self.known_face_names.append(name)
+                            print(f"  Encoded: {name} ({file}) [High Precision]")
+                        else:
+                            print(f"  Warning: No face found in {path}")
                     except Exception as e:
-                        print(f"Error loading face {path}: {e}")
+                        print(f"  Error loading face {path}: {e}")
                         
         print(f"Loaded {len(self.known_face_names)} faces from DB.")
 
@@ -83,6 +97,9 @@ class FaceRecognizer:
                     name = self.known_face_names[best_match_index]
 
             face_names.append(name)
+
+        self.last_face_locations = face_locations
+        self.last_face_names = face_names
 
         # Draw the results
         annotated_frame = frame.copy()

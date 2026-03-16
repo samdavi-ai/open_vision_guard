@@ -1,34 +1,66 @@
 import cv2
 import numpy as np
+import pickle
+import os
 from scipy.spatial.distance import cosine
+from ai.feature_extractor import DeepFeatureExtractor
 
 class ReIDTracker:
-    def __init__(self, similarity_threshold=0.85, device='cpu'):
+    def __init__(self, similarity_threshold=0.6, device='cpu'):
         self.similarity_threshold = similarity_threshold
-        # Note: device arg kept for compatibility with detect.py API, but histograms run efficiently on CPU via OpenCV
+        self.device = device
+        self.extractor = DeepFeatureExtractor(device=device)
         
-        self.global_subjects = {} # global_id -> {'features':[], 'avg_feature': ndarray}
+        self.global_subjects = {} # global_id -> {'features':[], 'avg_feature': ndarray, 'class_name': str, 'name': str}
         self.session_locks = {}   # local_track_id -> global_id
-        self.next_subject_id = 1
+        self.next_subject_ids = {} # class_name -> next_id
+        
+    def save_registry(self, path="registry.pkl"):
+        """Saves the global subjects registry to a file."""
+        try:
+            data = {
+                'global_subjects': self.global_subjects,
+                'next_subject_ids': self.next_subject_ids
+            }
+            with open(path, 'wb') as f:
+                pickle.dump(data, f)
+            print(f"Registry saved to {path} ({len(self.global_subjects)} subjects)")
+        except Exception as e:
+            print(f"Error saving registry: {e}")
+
+    def load_registry(self, path="registry.pkl"):
+        """Loads the global subjects registry from a file."""
+        if not os.path.exists(path):
+            print(f"No registry found at {path}, starting fresh.")
+            return
+
+        try:
+            with open(path, 'rb') as f:
+                data = pickle.load(f)
+            self.global_subjects = data.get('global_subjects', {})
+            # Migration: Ensure all subjects have 'name' and 'class_name' keys
+            for sid, subj in self.global_subjects.items():
+                if 'name' not in subj:
+                    subj['name'] = None
+                if 'class_name' not in subj:
+                    # Try to infer class from sid if it's formatted like "Class_N"
+                    if "_" in sid:
+                        subj['class_name'] = sid.split("_")[0].lower()
+                    else:
+                        subj['class_name'] = 'person' # Fallback
+            
+            self.next_subject_ids = data.get('next_subject_ids', {})
+            print(f"Registry loaded from {path} ({len(self.global_subjects)} subjects)")
+        except Exception as e:
+            print(f"Error loading registry: {e}")
         
     def extract_feature(self, frame_crop):
         try:
-            # Advanced Feature Matching: 3D Color Histograms in HSV space
-            hsv = cv2.cvtColor(frame_crop, cv2.COLOR_BGR2HSV)
-            
-            # Using 8 bins per channel -> 8x8x8 = 512 dimensional feature vector
-            hist = cv2.calcHist([hsv], [0, 1, 2], None, [8, 8, 8], [0, 180, 0, 256, 0, 256])
-            
-            # Normalize and flatten
-            cv2.normalize(hist, hist)
-            feat = hist.flatten()
-            
-            # To avoid divide by zero later, add tiny epsilon
-            norm = np.linalg.norm(feat)
-            if norm == 0:
-                return None
-            return feat / norm
+            # Use Neural Deep Feature Extractor instead of histograms
+            feat = self.extractor.extract(frame_crop)
+            return feat
         except Exception as e:
+            print(f"Extraction error: {e}")
             return None
             
     def match_feature(self, feature):
@@ -49,9 +81,14 @@ class ReIDTracker:
             return best_match, best_sim
         return None, best_sim
 
-    def register_feature(self, subj_id, feature):
+    def register_feature(self, subj_id, feature, class_name=None):
         if subj_id not in self.global_subjects:
-            self.global_subjects[subj_id] = {'features': [feature], 'avg_feature': feature}
+            self.global_subjects[subj_id] = {
+                'features': [feature], 
+                'avg_feature': feature,
+                'class_name': class_name,
+                'name': None
+            }
         else:
             self.global_subjects[subj_id]['features'].append(feature)
             # Temporal averaging (running average of last 10 features to smooth lighting changes)
@@ -64,6 +101,21 @@ class ReIDTracker:
                 avg_feat = avg_feat / norm
                 
             self.global_subjects[subj_id]['avg_feature'] = avg_feat
+
+    def update_identity(self, global_id, name):
+        """Updates the name of a global subject (e.g., when a face is recognized)."""
+        if global_id in self.global_subjects:
+            self.global_subjects[global_id]['name'] = name
+            return True
+        return False
+
+    def get_display_name(self, global_id):
+        """Returns the name if available, otherwise the global_id."""
+        if global_id in self.global_subjects:
+            subj = self.global_subjects[global_id]
+            if subj['name'] and subj['name'] != "Unknown":
+                return f"{subj['name']} ({global_id})"
+        return global_id
 
     def process_frame_tracking(self, frame, yolo_results):
         annotated_frame = frame.copy()
@@ -110,21 +162,26 @@ class ReIDTracker:
                 
                 if matched_id is not None:
                     global_id = matched_id
-                    alerts.append(f"Re-Identified {global_id} (sim: {sim:.2f})")
+                    alerts.append(f"Re-Identified {self.get_display_name(global_id)} (sim: {sim:.2f})")
                 else:
-                    global_id = f"Subject_{self.next_subject_id}"
-                    self.next_subject_id += 1
+                    # Generate new ID based on class
+                    class_name = yolo_results[0].names[cls_id].capitalize()
+                    next_id = self.next_subject_ids.get(class_name, 1)
+                    global_id = f"{class_name}_{next_id}"
+                    self.next_subject_ids[class_name] = next_id + 1
                     alerts.append(f"New Subject: {global_id}")
                     
                 # Register feature & lock track
-                self.register_feature(global_id, feat)
+                self.register_feature(global_id, feat, class_name=yolo_results[0].names[cls_id])
                 self.session_locks[track_id] = global_id
                 
             # Draw on frame
             global_id = self.session_locks.get(track_id, "Unknown")
+            display_name = self.get_display_name(global_id)
             cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), (255, 0, 0), 2)
             # Add a slight background for readable text
-            cv2.rectangle(annotated_frame, (x1, y1-25), (x1 + 120, y1), (255, 0, 0), -1)
-            cv2.putText(annotated_frame, global_id, (x1 + 5, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+            (w, h), _ = cv2.getTextSize(display_name, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
+            cv2.rectangle(annotated_frame, (x1, y1-h-10), (x1 + w + 10, y1), (255, 0, 0), -1)
+            cv2.putText(annotated_frame, display_name, (x1 + 5, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
             
         return annotated_frame, alerts
