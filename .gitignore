@@ -28,6 +28,7 @@ ENV/
 # Generated data (large, not needed in git)
 data/thumbnails/
 data/uploads/
+backend/uploads/
 
 # Frontend build artifacts
 openvision-ui/node_modules/
