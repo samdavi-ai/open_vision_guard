@@ -24,3 +24,19 @@ ENV/
 
 # Database
 *.db
+
+# Generated data (large, not needed in git)
+data/thumbnails/
+data/uploads/
+
+# Frontend build artifacts
+openvision-ui/node_modules/
+openvision-ui/dist/
+openvision-ui/.vite/
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
