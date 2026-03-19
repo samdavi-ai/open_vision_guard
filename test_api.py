@@ -1,7 +1,7 @@
 import requests
 import time
 
-API_URL = "http://localhost:8000"
+API_URL = "http://localhost:8080"
 
 def test_stream():
     print("Testing /stream/start endpoint...")

@@ -80,6 +80,9 @@ class EmbeddingEngine:
         new_id = f"Person_{self.next_id_counter:03d}"
         self.next_id_counter += 1
         
+        import datetime
+        now_iso = datetime.datetime.now().isoformat()
+        
         self.registry[new_id] = {
             "global_id": new_id,
             "embedding": new_embedding,
@@ -89,7 +92,16 @@ class EmbeddingEngine:
                 "risk_level": "low",
                 "clothing_color": "unknown",
                 "last_seen_camera": "unknown",
-                "last_seen_time": datetime.datetime.now().isoformat()
+                "last_seen_time": now_iso,
+                "movement_direction": "stationary",
+                "speed": 0.0,
+                "pose_detail": "unknown",
+                "entry_time": now_iso,
+                "exit_time": now_iso,
+                "carried_objects": [],
+                "object_log": [],
+                "zone_history": [],
+                "total_appearances": 1
             },
             "history": []
         }

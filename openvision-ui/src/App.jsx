@@ -5,8 +5,8 @@ import AlertsFeed from './components/AlertsFeed';
 import PersonView from './components/PersonView';
 import './index.css';
 
-const API_BASE = "http://localhost:8000";
-const WS_BASE  = "ws://localhost:8000";
+const API_BASE = "http://localhost:8080";
+const WS_BASE  = "ws://localhost:8080";
 
 export default function App() {
   const [isStreaming, setIsStreaming]   = useState(false);

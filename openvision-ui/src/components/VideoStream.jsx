@@ -1,18 +1,15 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 
 /**
- * VideoStream renders the annotated JPEG frames and overlays invisible
- * click-targets on top of each detected person (for click-to-analyze).
- *
- * KEY FIX: The image uses objectFit:contain so there are black letterbox bars.
- * Click-targets must be offset to the actual rendered image position, not the
- * container top-left.
+ * VideoStream renders the annotated JPEG frames and overlays interactive
+ * click-targets on top of each detected person with enriched info on hover.
  */
 export default function VideoStream({ wsUrl, setFps, onPersonClick }) {
   const [frameSrc, setFrameSrc]   = useState(null);
   const [detections, setDetections] = useState([]);
   const [dims, setDims]            = useState({ w: 1, h: 1 });
-  const [imgBox, setImgBox]        = useState(null); // rendered image bounds relative to container
+  const [imgBox, setImgBox]        = useState(null);
+  const [hoveredId, setHoveredId]  = useState(null);
 
   const wsRef        = useRef(null);
   const containerRef = useRef(null);
@@ -39,15 +36,13 @@ export default function VideoStream({ wsUrl, setFps, onPersonClick }) {
     return () => ws.close();
   }, [wsUrl]);
 
-  /* ── Measure actual image bounds within container (handles letterbox) ── */
+  /* ── Measure actual image bounds ── */
   const measureImage = useCallback(() => {
     const img = imgRef.current;
     const cnt = containerRef.current;
     if (!img || !cnt) return;
-
     const cRect = cnt.getBoundingClientRect();
     const iRect = img.getBoundingClientRect();
-
     setImgBox({
       left:   iRect.left - cRect.left,
       top:    iRect.top  - cRect.top,
@@ -61,7 +56,7 @@ export default function VideoStream({ wsUrl, setFps, onPersonClick }) {
     return () => window.removeEventListener('resize', measureImage);
   }, [measureImage]);
 
-  /* ── Convert native bbox to CSS position inside container ── */
+  /* ── Convert native bbox to CSS ── */
   const toCSS = (bbox) => {
     if (!imgBox) return null;
     const sx = imgBox.width  / dims.w;
@@ -74,6 +69,9 @@ export default function VideoStream({ wsUrl, setFps, onPersonClick }) {
       height: (bbox[3] - bbox[1]) * sy,
     };
   };
+
+  const RISK_COLORS = { low: '#22c55e', medium: '#eab308', high: '#f97316', critical: '#ef4444' };
+  const DIR_ARROWS = { left: '←', right: '→', towards: '↓', away: '↑', stationary: '•' };
 
   return (
     <div
@@ -90,35 +88,68 @@ export default function VideoStream({ wsUrl, setFps, onPersonClick }) {
         />
       )}
 
-      {/* Invisible click targets — positioned over each detected person */}
+      {/* Detection overlays */}
       {imgBox && detections.map((det) => {
         const css = toCSS(det.bbox);
         if (!css) return null;
+        const isHovered = hoveredId === det.global_id;
+        const riskColor = RISK_COLORS[det.risk_level] || RISK_COLORS.low;
+
         return (
-          <div
-            key={det.global_id}
-            title={`Analyze: ${det.display_name || det.global_id}`}
-            onClick={() => onPersonClick && onPersonClick(det.global_id)}
-            style={{
-              ...css,
-              cursor: 'crosshair',
-              zIndex: 20,
-              border: '2px solid transparent',
-              borderRadius: 4,
-              transition: 'all 0.1s ease',
-              boxSizing: 'border-box',
-            }}
-            onMouseEnter={e => {
-              e.currentTarget.style.background = 'rgba(59,130,246,0.18)';
-              e.currentTarget.style.borderColor = 'rgba(59,130,246,0.85)';
-              e.currentTarget.style.boxShadow = '0 0 12px rgba(59,130,246,0.4)';
-            }}
-            onMouseLeave={e => {
-              e.currentTarget.style.background = 'transparent';
-              e.currentTarget.style.borderColor = 'transparent';
-              e.currentTarget.style.boxShadow = 'none';
-            }}
-          />
+          <div key={det.global_id}>
+            {/* Clickable box */}
+            <div
+              title={`Analyze: ${det.display_name || det.global_id}`}
+              onClick={() => onPersonClick && onPersonClick(det.global_id)}
+              onMouseEnter={() => setHoveredId(det.global_id)}
+              onMouseLeave={() => setHoveredId(null)}
+              style={{
+                ...css,
+                cursor: 'crosshair',
+                zIndex: 20,
+                border: isHovered ? `2px solid ${riskColor}` : '2px solid transparent',
+                borderRadius: 4,
+                transition: 'all 0.15s ease',
+                boxSizing: 'border-box',
+                background: isHovered ? `${riskColor}18` : 'transparent',
+                boxShadow: isHovered ? `0 0 12px ${riskColor}40` : 'none',
+              }}
+            />
+
+            {/* Hover info tooltip */}
+            {isHovered && (
+              <div style={{
+                position: 'absolute',
+                left: css.left,
+                top: Math.max(0, css.top - 76),
+                zIndex: 30,
+                background: 'rgba(8,15,30,0.92)',
+                backdropFilter: 'blur(8px)',
+                border: `1px solid ${riskColor}50`,
+                borderRadius: 6,
+                padding: '5px 8px',
+                minWidth: 140,
+                pointerEvents: 'none',
+                boxShadow: `0 4px 16px rgba(0,0,0,0.5), 0 0 8px ${riskColor}20`,
+              }}>
+                <div style={{ fontSize: '0.72rem', fontWeight: 700, marginBottom: 3, color: 'var(--text-main)' }}>
+                  {det.display_name || det.global_id}
+                </div>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '2px 8px', fontSize: '0.62rem' }}>
+                  <span style={{ color: 'var(--text-dim)' }}>Risk</span>
+                  <span style={{ color: riskColor, fontWeight: 600, textTransform: 'uppercase' }}>{det.risk_level || 'low'}</span>
+                  <span style={{ color: 'var(--text-dim)' }}>Pose</span>
+                  <span style={{ color: '#60a5fa', textTransform: 'capitalize' }}>{det.pose_detail || det.activity || '—'}</span>
+                  <span style={{ color: 'var(--text-dim)' }}>Move</span>
+                  <span>{DIR_ARROWS[det.movement_direction] || '•'} {det.movement_direction || 'still'}</span>
+                  {det.carried_objects?.length > 0 && <>
+                    <span style={{ color: 'var(--text-dim)' }}>Objects</span>
+                    <span style={{ color: '#a78bfa' }}>{det.carried_objects.join(', ')}</span>
+                  </>}
+                </div>
+              </div>
+            )}
+          </div>
         );
       })}
     </div>

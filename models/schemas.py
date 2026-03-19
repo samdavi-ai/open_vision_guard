@@ -22,6 +22,17 @@ class IdentityMetadata(BaseModel):
     clothing_color: Optional[str] = None
     last_seen_camera: Optional[str] = None
     last_seen_time: Optional[str] = None
+    # Enhanced fields
+    movement_direction: Optional[str] = None   # "left", "right", "towards", "away", "stationary"
+    speed: Optional[float] = 0.0               # px/sec movement speed
+    pose_detail: Optional[str] = None          # "standing", "sitting", "crouching", "falling"
+    entry_time: Optional[str] = None           # ISO timestamp of first detection
+    exit_time: Optional[str] = None            # ISO timestamp of last detection (updated each frame)
+    carried_objects: Optional[List[str]] = []   # ["backpack", "suitcase"]
+    object_log: Optional[List[Dict[str, Any]]] = []  # [{object, action, timestamp}]
+    zone_history: Optional[List[str]] = []     # camera zones visited
+    total_appearances: Optional[int] = 0
+
 
 
 class IdentityResponse(BaseModel):

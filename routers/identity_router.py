@@ -78,3 +78,12 @@ async def get_timeline(global_id: str):
     """All events for this person across cameras."""
     history = database.get_identity_history(global_id)
     return {"global_id": global_id, "events": history}
+
+
+@router.get("/identities/{global_id}/alerts")
+async def get_person_alerts(global_id: str):
+    """All alerts involving this person."""
+    all_alerts = database.get_alerts()
+    person_alerts = [a for a in all_alerts if a.get("global_id") == global_id]
+    return {"global_id": global_id, "alerts": person_alerts}
+

@@ -36,6 +36,9 @@ class Pipeline:
         # Per-camera zone configs
         self.camera_zones: Dict[str, List[Dict]] = {}
 
+        # Movement tracking: global_id → {prev_center, prev_time}
+        self._prev_centers: Dict[str, Dict[str, Any]] = {}
+
         # Initialize database
         database.init_db()
         print("Pipeline ready.")
@@ -52,19 +55,10 @@ class Pipeline:
         current_detections_list = []
         current_time = time.time()
 
-        # Resize to 320px max for fastest inference (scale back coords afterwards)
-        max_dim = 320
-        scale = min(max_dim / orig_w, max_dim / orig_h, 1.0)
-        if scale < 1.0:
-            inf_w, inf_h = int(orig_w * scale), int(orig_h * scale)
-            inf_frame = cv2.resize(frame, (inf_w, inf_h))
-        else:
-            inf_frame = frame
-            scale = 1.0
-
-        # 1. YOLOv8n Detection + Tracking (320px — fast on CPU)
-        yolo_results = self.yolo_model.track(inf_frame, persist=True, verbose=False, imgsz=320)
-        # annotated_frame = yolo_results[0].plot() # Remove cluttered default drawings
+        # 1. YOLOv8n Detection + Tracking
+        # Pass the original frame directly — YOLO handles resize/letterbox
+        # internally via imgsz and returns coords in the original frame space.
+        yolo_results = self.yolo_model.track(frame, persist=True, verbose=False, imgsz=320)
 
         # Extract person detections
         person_boxes = []
@@ -79,11 +73,9 @@ class Pipeline:
                 if cls_id != 0:  # Only persons (COCO class 0)
                     continue
 
-                # Scale coords back to original frame size
-                x1 = int(box[0] / scale); y1 = int(box[1] / scale)
-                x2 = int(box[2] / scale); y2 = int(box[3] / scale)
-                x1, y1 = max(0, x1), max(0, y1)
-                x2, y2 = min(orig_w, x2), min(orig_h, y2)
+                # Coords are already in original frame space (YOLO maps them back)
+                x1, y1 = max(0, int(box[0])), max(0, int(box[1]))
+                x2, y2 = min(orig_w, int(box[2])), min(orig_h, int(box[3]))
 
                 if x2 <= x1 or y2 <= y1:
                     continue
@@ -94,12 +86,35 @@ class Pipeline:
 
                 # 2. Embedding → Persistent Identity
                 global_id = embedding_engine.get_or_create_identity(crop)
+                now_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ")
                 embedding_engine.update_identity_metadata(global_id, {
                     "last_seen_camera": camera_id,
-                    "last_seen_time": time.strftime("%Y-%m-%dT%H:%M:%SZ")
+                    "last_seen_time": now_iso,
+                    "exit_time": now_iso,  # continuously update exit time
                 })
 
-                person_boxes.append(box)
+                # --- Movement direction & speed ---
+                cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
+                prev = self._prev_centers.get(global_id)
+                if prev:
+                    dx = cx - prev["cx"]
+                    dy = cy - prev["cy"]
+                    dt = max(current_time - prev["t"], 0.001)
+                    speed = ((dx**2 + dy**2)**0.5) / dt
+                    if abs(dx) < 3 and abs(dy) < 3:
+                        direction = "stationary"
+                    elif abs(dx) > abs(dy):
+                        direction = "right" if dx > 0 else "left"
+                    else:
+                        direction = "away" if dy > 0 else "towards"
+                    embedding_engine.update_identity_metadata(global_id, {
+                        "movement_direction": direction,
+                        "speed": round(speed, 1),
+                    })
+                self._prev_centers[global_id] = {"cx": cx, "cy": cy, "t": current_time}
+
+                # Store scaled int coords (same space as current_detections_list)
+                person_boxes.append([x1, y1, x2, y2])
                 person_ids.append(global_id)
 
                 # Build display name for the frontend
@@ -124,7 +139,10 @@ class Pipeline:
                 # 4. Pose & Activity
                 if config.pose_enabled:
                     pose_result = self.pose_analyzer.analyze_pose(frame, (x1, y1, x2, y2))
-                    embedding_engine.update_identity_metadata(global_id, {"activity": pose_result["activity"]})
+                    embedding_engine.update_identity_metadata(global_id, {
+                        "activity": pose_result["activity"],
+                        "pose_detail": pose_result["activity"],
+                    })
 
                     if pose_result["fall_detected"]:
                         alert = alert_engine.create_alert("fall", global_id, camera_id, pose_result, frame)
@@ -186,8 +204,16 @@ class Pipeline:
                         if new_obj not in prev_objects:
                             # Person acquired a new object
                             prev_objects.add(new_obj)
+                            # Log the acquisition event
+                            identity_obj_log = list(identity['metadata'].get('object_log', []))
+                            identity_obj_log.append({
+                                "object": new_obj,
+                                "action": "acquired",
+                                "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ")
+                            })
                             embedding_engine.update_identity_metadata(nearest_pid, {
-                                "carried_objects": list(prev_objects)
+                                "carried_objects": list(prev_objects),
+                                "object_log": identity_obj_log,
                             })
                             if len(prev_objects) > 1:
                                 alert = alert_engine.create_alert(
@@ -201,14 +227,22 @@ class Pipeline:
                                 "carried_objects": list(prev_objects)
                             })
 
-            # Update detection list with carried objects
+            # Update detection list with ALL enriched metadata
             for det in current_detections_list:
                 gid = det["global_id"]
                 identity = embedding_engine.get_identity(gid)
                 if identity:
-                    det["carried_objects"] = identity['metadata'].get('carried_objects', [])
-                    det["activity"] = identity['metadata'].get('activity', 'unknown')
-                    det["risk_level"] = identity['metadata'].get('risk_level', 'low')
+                    m = identity['metadata']
+                    det["carried_objects"] = m.get('carried_objects', [])
+                    det["activity"] = m.get('activity', 'unknown')
+                    det["risk_level"] = m.get('risk_level', 'low')
+                    det["movement_direction"] = m.get('movement_direction', 'stationary')
+                    det["speed"] = m.get('speed', 0.0)
+                    det["pose_detail"] = m.get('pose_detail', 'unknown')
+                    det["entry_time"] = m.get('entry_time')
+                    det["exit_time"] = m.get('exit_time')
+                    det["object_log"] = m.get('object_log', [])
+                    det["face_name"] = m.get('face_name')
 
         # 8. Weapon Detection (full frame)
         if config.weapon_detection_enabled:

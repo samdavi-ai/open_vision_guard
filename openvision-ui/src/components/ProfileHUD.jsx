@@ -7,7 +7,7 @@ export default function ProfileHUD({ globalId, onClose }) {
   useEffect(() => {
     const fetchProfile = async () => {
       try {
-        const res = await fetch(`http://localhost:8000/identities/${globalId}`);
+        const res = await fetch(`http://localhost:8080/identities/${globalId}`);
         if (res.ok) {
           const data = await res.json();
           setProfile(data);
