@@ -80,7 +80,6 @@ class EmbeddingEngine:
         new_id = f"Person_{self.next_id_counter:03d}"
         self.next_id_counter += 1
         
-        import datetime
         now_iso = datetime.datetime.now().isoformat()
         
         self.registry[new_id] = {

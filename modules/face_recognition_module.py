@@ -42,7 +42,7 @@ class FaceRecognitionModule:
             results = DeepFace.find(
                 img_path=face_crop,
                 db_path=self.known_faces_dir,
-                model_name="VGG-Face",
+                model_name="Facenet512",
                 enforce_detection=False,
                 silent=True
             )
@@ -73,7 +73,7 @@ class FaceRecognitionModule:
             results = DeepFace.find(
                 img_path=frame,
                 db_path=self.known_faces_dir,
-                model_name="VGG-Face",
+                model_name="Facenet512",
                 enforce_detection=True,
                 silent=True
             )

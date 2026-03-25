@@ -31,6 +31,19 @@ RISK_COLORS_BGR = {
     'critical': (0, 0, 230),
 }
 
+# Colors for non-person object categories (BGR)
+CATEGORY_COLORS_BGR = {
+    'vehicle':    (0, 200, 0),       # green
+    'animal':     (0, 220, 220),     # yellow
+    'accessory':  (200, 130, 50),    # teal
+    'sports':     (50, 200, 255),    # orange
+    'food':       (100, 180, 255),   # peach
+    'furniture':  (180, 180, 100),   # slate blue
+    'electronic': (255, 150, 50),    # light blue
+    'kitchen':    (150, 100, 200),   # mauve
+    'other':      (180, 180, 180),   # gray
+}
+
 
 def get_pipeline() -> Pipeline:
     global _pipeline
@@ -45,27 +58,46 @@ def _draw_detections(frame: 'np.ndarray', detections: list) -> 'np.ndarray':
     out = frame.copy()
     for det in detections:
         x1, y1, x2, y2 = det["bbox"]
-        risk = det.get("risk_level", "low")
-        color = RISK_COLORS_BGR.get(risk, (255, 165, 0))
+        is_object = det.get("is_object", False)
 
-        # Box
-        _cv2.rectangle(out, (x1, y1), (x2, y2), color, 2)
+        if is_object:
+            # Non-person object: use category color
+            category = det.get("object_category", "other")
+            color = CATEGORY_COLORS_BGR.get(category, (180, 180, 180))
+            conf = det.get("confidence", 0)
+            label = f"{det.get('display_name', '?')} {conf:.0%}" if conf else det.get("display_name", "?")
 
-        # Label
-        label = det.get("display_name", det.get("global_id", "?"))
-        (tw, th), _ = _cv2.getTextSize(label, _cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)
-        _cv2.rectangle(out, (x1, max(0, y1 - th - 8)), (x1 + tw + 6, y1), color, -1)
-        _cv2.putText(out, label, (x1 + 3, max(th, y1) - 4),
-                     _cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1, _cv2.LINE_AA)
+            # Thinner box for objects
+            _cv2.rectangle(out, (x1, y1), (x2, y2), color, 1)
 
-        # Objects tag
-        objects = det.get("carried_objects", [])
-        if objects:
-            tag = ", ".join(objects)[:18]
-            (ow, oh), _ = _cv2.getTextSize(tag, _cv2.FONT_HERSHEY_SIMPLEX, 0.36, 1)
-            _cv2.rectangle(out, (x1, y2), (x1 + ow + 6, y2 + oh + 6), (130, 60, 200), -1)
-            _cv2.putText(out, tag, (x1 + 3, y2 + oh + 2),
-                         _cv2.FONT_HERSHEY_SIMPLEX, 0.36, (255, 255, 255), 1, _cv2.LINE_AA)
+            # Label background + text
+            (tw, th), _ = _cv2.getTextSize(label, _cv2.FONT_HERSHEY_SIMPLEX, 0.38, 1)
+            _cv2.rectangle(out, (x1, max(0, y1 - th - 6)), (x1 + tw + 4, y1), color, -1)
+            _cv2.putText(out, label, (x1 + 2, max(th, y1) - 3),
+                         _cv2.FONT_HERSHEY_SIMPLEX, 0.38, (255, 255, 255), 1, _cv2.LINE_AA)
+        else:
+            # Person: use risk-level color
+            risk = det.get("risk_level", "low")
+            color = RISK_COLORS_BGR.get(risk, (255, 165, 0))
+
+            # Box
+            _cv2.rectangle(out, (x1, y1), (x2, y2), color, 2)
+
+            # Label
+            label = det.get("display_name", det.get("global_id", "?"))
+            (tw, th), _ = _cv2.getTextSize(label, _cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)
+            _cv2.rectangle(out, (x1, max(0, y1 - th - 8)), (x1 + tw + 6, y1), color, -1)
+            _cv2.putText(out, label, (x1 + 3, max(th, y1) - 4),
+                         _cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1, _cv2.LINE_AA)
+
+            # Objects tag
+            objects = det.get("carried_objects", [])
+            if objects:
+                tag = ", ".join(objects)[:18]
+                (ow, oh), _ = _cv2.getTextSize(tag, _cv2.FONT_HERSHEY_SIMPLEX, 0.36, 1)
+                _cv2.rectangle(out, (x1, y2), (x1 + ow + 6, y2 + oh + 6), (130, 60, 200), -1)
+                _cv2.putText(out, tag, (x1 + 3, y2 + oh + 2),
+                             _cv2.FONT_HERSHEY_SIMPLEX, 0.36, (255, 255, 255), 1, _cv2.LINE_AA)
     return out
 
 
@@ -107,6 +139,8 @@ def _stream_worker(camera_id: str, source: str):
     frame_delay = 1.0 / native_fps
 
     active_streams[camera_id]["status"] = "running"
+    last_ai_time = 0.0
+    detections = []
 
     while active_streams.get(camera_id, {}).get("status") == "running":
         t0 = time.monotonic()
@@ -120,21 +154,25 @@ def _stream_worker(camera_id: str, source: str):
         # Store raw frame
         _latest_raw_frames[camera_id] = {"frame": frame.copy(), "timestamp": time.time()}
 
-        # Run AI (YOLOv8n at 320px — fast enough for single-thread sync)
-        try:
-            result = pipeline.process_frame(frame, camera_id)
-            detections = result.current_detections
-            active_streams[camera_id]["latest_alerts"] = result.alerts
-        except Exception as e:
-            print(f"[Pipeline error] {e}")
-            detections = active_streams[camera_id].get("latest_detections", [])
+        # Run AI only every ~100-150ms (Asynchronous Sync)
+        # This allows the video to play at native speed while AI tracks accurately.
+        now = time.monotonic()
+        if now - last_ai_time > 0.12:  # Target ~8 AI FPS inside a 30 FPS video loop
+            try:
+                result = pipeline.process_frame(frame, camera_id)
+                detections = result.current_detections
+                active_streams[camera_id]["latest_alerts"] = result.alerts
+                last_ai_time = now
+            except Exception as e:
+                print(f"[Pipeline error] {e}")
+                detections = active_streams[camera_id].get("latest_detections", [])
 
         active_streams[camera_id]["latest_detections"] = detections
 
         # Update person crops for WebSocket crop streams
         _update_crops(frame, detections, camera_id)
 
-        # Draw detections onto annotated frame (always synced)
+        # Draw detections onto annotated frame (always synced to the pixel space)
         annotated = _draw_detections(frame, detections)
 
         # Encode and store
@@ -146,9 +184,10 @@ def _stream_worker(camera_id: str, source: str):
             "width": annotated.shape[1],
             "height": annotated.shape[0],
             "detections": detections,
+            "fps": int(1.0 / (time.monotonic() - t0 + 0.001))
         })
 
-        # Frame-rate timing
+        # Frame-rate timing (strict native video speed control)
         elapsed = time.monotonic() - t0
         remaining = frame_delay - elapsed
         if remaining > 0:
@@ -162,12 +201,20 @@ def _stream_worker(camera_id: str, source: str):
 
 @router.post("/stream/upload")
 async def upload_video(file: UploadFile = File(...)):
-    upload_dir = os.path.join("data", "uploads")
-    os.makedirs(upload_dir, exist_ok=True)
-    path = os.path.join(upload_dir, file.filename)
-    with open(path, "wb") as f:
-        f.write(await file.read())
-    return {"message": "Uploaded", "path": path}
+    print(f"[Upload] Received file: {file.filename}, type: {file.content_type}")
+    try:
+        upload_dir = os.path.join("data", "uploads")
+        os.makedirs(upload_dir, exist_ok=True)
+        path = os.path.join(upload_dir, file.filename)
+        content = await file.read()
+        print(f"[Upload] File size: {len(content)} bytes")
+        with open(path, "wb") as f:
+            f.write(content)
+        print(f"[Upload] Saved to: {path}")
+        return {"message": "Uploaded", "path": path}
+    except Exception as e:
+        print(f"[Upload error] {e}")
+        return {"error": str(e)}
 
 
 @router.post("/stream/start")

@@ -24,9 +24,51 @@ class PipelineResult:
 
 
 class Pipeline:
+    # COCO class names for all 80 classes
+    COCO_NAMES = {
+        0: 'person', 1: 'bicycle', 2: 'car', 3: 'motorcycle', 4: 'airplane',
+        5: 'bus', 6: 'train', 7: 'truck', 8: 'boat', 9: 'traffic light',
+        10: 'fire hydrant', 11: 'stop sign', 12: 'parking meter', 13: 'bench',
+        14: 'bird', 15: 'cat', 16: 'dog', 17: 'horse', 18: 'sheep', 19: 'cow',
+        20: 'elephant', 21: 'bear', 22: 'zebra', 23: 'giraffe', 24: 'backpack',
+        25: 'umbrella', 26: 'handbag', 27: 'tie', 28: 'suitcase', 29: 'frisbee',
+        30: 'skis', 31: 'snowboard', 32: 'sports ball', 33: 'kite',
+        34: 'baseball bat', 35: 'baseball glove', 36: 'skateboard', 37: 'surfboard',
+        38: 'tennis racket', 39: 'bottle', 40: 'wine glass', 41: 'cup',
+        42: 'fork', 43: 'knife', 44: 'spoon', 45: 'bowl', 46: 'banana',
+        47: 'apple', 48: 'sandwich', 49: 'orange', 50: 'broccoli', 51: 'carrot',
+        52: 'hot dog', 53: 'pizza', 54: 'donut', 55: 'cake', 56: 'chair',
+        57: 'couch', 58: 'potted plant', 59: 'bed', 60: 'dining table',
+        61: 'toilet', 62: 'tv', 63: 'laptop', 64: 'mouse', 65: 'remote',
+        66: 'keyboard', 67: 'cell phone', 68: 'microwave', 69: 'oven',
+        70: 'toaster', 71: 'sink', 72: 'refrigerator', 73: 'book',
+        74: 'clock', 75: 'vase', 76: 'scissors', 77: 'teddy bear',
+        78: 'hair drier', 79: 'toothbrush'
+    }
+
+    # Category groupings for color coding on the frontend
+    CATEGORY_MAP = {
+        'vehicle': {1, 2, 3, 4, 5, 6, 7, 8},
+        'animal': {14, 15, 16, 17, 18, 19, 20, 21, 22, 23},
+        'accessory': {24, 25, 26, 27, 28},
+        'sports': {29, 30, 31, 32, 33, 34, 35, 36, 37, 38},
+        'food': {46, 47, 48, 49, 50, 51, 52, 53, 54, 55},
+        'furniture': {13, 56, 57, 59, 60},
+        'electronic': {62, 63, 64, 65, 66, 67},
+        'kitchen': {39, 40, 41, 42, 43, 44, 45, 68, 69, 70, 71, 72},
+        'other': {9, 10, 11, 12, 58, 61, 73, 74, 75, 76, 77, 78, 79},
+    }
+
+    @staticmethod
+    def get_object_category(cls_id: int) -> str:
+        for cat, ids in Pipeline.CATEGORY_MAP.items():
+            if cls_id in ids:
+                return cat
+        return 'other'
+
     def __init__(self, yolo_model_path: str = "yolov8n.pt", device: str = "cpu"):
-        print("Loading pipeline models (lightweight mode)...")
-        self.yolo_model = YOLO(yolo_model_path)  # nano: fastest model
+        print("Loading pipeline models (Ultra-Fast Nano mode)...")
+        self.yolo_model = YOLO(yolo_model_path)  # nano: fastest for real-time dynamic feel
         self.face_module = FaceRecognitionModule()
         self.pose_analyzer = PoseAnalyzer()
         self.motion_detector = MotionDetector()
@@ -38,6 +80,9 @@ class Pipeline:
 
         # Movement tracking: global_id → {prev_center, prev_time}
         self._prev_centers: Dict[str, Dict[str, Any]] = {}
+
+        # Counter for non-person objects without tracker IDs
+        self._obj_counter = 0
 
         # Initialize database
         database.init_db()
@@ -55,24 +100,30 @@ class Pipeline:
         current_detections_list = []
         current_time = time.time()
 
-        # 1. YOLOv8n Detection + Tracking
-        # Pass the original frame directly — YOLO handles resize/letterbox
-        # internally via imgsz and returns coords in the original frame space.
-        yolo_results = self.yolo_model.track(frame, persist=True, verbose=False, imgsz=320)
+        # 1. YOLOv8n Detection + Tracking (ALL classes)
+        # Using 640px for accuracy (standard) + lower conf to catch "every person".
+        yolo_results = self.yolo_model.track(
+            frame, 
+            persist=True, 
+            verbose=False, 
+            imgsz=640,
+            conf=0.20,
+            iou=0.45,
+            tracker="bytetrack.yaml"  # sometimes smoother for high-density crowds
+        )
 
-        # Extract person detections
+        # Extract all detections
         person_boxes = []
         person_ids = []
 
-        if yolo_results[0].boxes is not None and yolo_results[0].boxes.id is not None:
+        if yolo_results[0].boxes is not None:
             boxes = yolo_results[0].boxes.xyxy.cpu().numpy()
-            track_ids = yolo_results[0].boxes.id.int().cpu().numpy()
             cls_ids = yolo_results[0].boxes.cls.int().cpu().numpy()
+            confs = yolo_results[0].boxes.conf.cpu().numpy()
+            has_ids = yolo_results[0].boxes.id is not None
+            track_ids = yolo_results[0].boxes.id.int().cpu().numpy() if has_ids else [None] * len(boxes)
 
-            for box, track_id, cls_id in zip(boxes, track_ids, cls_ids):
-                if cls_id != 0:  # Only persons (COCO class 0)
-                    continue
-
+            for box, track_id, cls_id, conf in zip(boxes, track_ids, cls_ids, confs):
                 # Coords are already in original frame space (YOLO maps them back)
                 x1, y1 = max(0, int(box[0])), max(0, int(box[1]))
                 x2, y2 = min(orig_w, int(box[2])), min(orig_h, int(box[3]))
@@ -80,6 +131,35 @@ class Pipeline:
                 if x2 <= x1 or y2 <= y1:
                     continue
 
+                # --- Accuracy Filter: Discard unrealistic "ghost" boxes ---
+                # (e.g. extremely thin full-height boxes often seen on video edges or reflections)
+                bw, bh = x2 - x1, y2 - y1
+                if cls_id == 0:  # Person specific
+                    # A person should not be a vertical line (aspect ratio < 0.1)
+                    # or cover 100% height while being < 10% width (typical edge ghost)
+                    if (bw / bh < 0.1) or (bh > orig_h * 0.9 and bw < orig_w * 0.1):
+                        continue
+                
+                cls_id_int = int(cls_id)
+                class_name = self.COCO_NAMES.get(cls_id_int, f'class_{cls_id_int}')
+                category = self.get_object_category(cls_id_int)
+
+                # ───── NON-PERSON OBJECTS ─────
+                if cls_id_int != 0:
+                    self._obj_counter += 1
+                    obj_id = f"Obj_{track_id}" if track_id is not None else f"Obj_{self._obj_counter}"
+                    current_detections_list.append({
+                        "global_id": obj_id,
+                        "bbox": [x1, y1, x2, y2],
+                        "display_name": class_name,
+                        "is_object": True,
+                        "object_class": class_name,
+                        "object_category": category,
+                        "confidence": round(float(conf), 2),
+                    })
+                    continue
+
+                # ───── PERSON PROCESSING (cls_id == 0) ─────
                 crop = frame[y1:y2, x1:x2]
                 if crop.size == 0:
                     continue
@@ -127,7 +207,10 @@ class Pipeline:
                 current_detections_list.append({
                     "global_id": global_id,
                     "bbox": [x1, y1, x2, y2],
-                    "display_name": display_name
+                    "display_name": display_name,
+                    "is_object": False,
+                    "object_class": "person",
+                    "object_category": "person",
                 })
                             
                 # 3. Face Recognition (if face visible)

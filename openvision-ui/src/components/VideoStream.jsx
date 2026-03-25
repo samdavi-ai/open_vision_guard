@@ -73,6 +73,13 @@ export default function VideoStream({ wsUrl, setFps, onPersonClick }) {
   const RISK_COLORS = { low: '#22c55e', medium: '#eab308', high: '#f97316', critical: '#ef4444' };
   const DIR_ARROWS = { left: '←', right: '→', towards: '↓', away: '↑', stationary: '•' };
 
+  // Colors for non-person object categories
+  const CATEGORY_COLORS = {
+    vehicle: '#00c853', animal: '#ffab00', accessory: '#29b6f6',
+    sports: '#ff9100', food: '#ff6e40', furniture: '#78909c',
+    electronic: '#42a5f5', kitchen: '#ab47bc', other: '#90a4ae',
+  };
+
   return (
     <div
       ref={containerRef}
@@ -89,9 +96,59 @@ export default function VideoStream({ wsUrl, setFps, onPersonClick }) {
       )}
 
       {/* Detection overlays */}
-      {imgBox && detections.map((det) => {
+      {imgBox && detections.map((det, idx) => {
         const css = toCSS(det.bbox);
         if (!css) return null;
+        const isObject = det.is_object;
+
+        if (isObject) {
+          // ─── NON-PERSON OBJECT ───
+          const catColor = CATEGORY_COLORS[det.object_category] || '#90a4ae';
+          const isObjHovered = hoveredId === det.global_id;
+          return (
+            <div key={`obj-${det.global_id}-${idx}`}>
+              <div
+                onMouseEnter={() => setHoveredId(det.global_id)}
+                onMouseLeave={() => setHoveredId(null)}
+                style={{
+                  ...css,
+                  zIndex: 15,
+                  border: `1px solid ${catColor}60`,
+                  borderRadius: 3,
+                  background: isObjHovered ? `${catColor}18` : 'transparent',
+                  transition: 'all 0.15s ease',
+                  boxSizing: 'border-box',
+                  pointerEvents: 'auto',
+                }}
+              />
+              {isObjHovered && (
+                <div style={{
+                  position: 'absolute',
+                  left: css.left,
+                  top: Math.max(0, css.top - 40),
+                  zIndex: 30,
+                  background: 'rgba(8,15,30,0.92)',
+                  backdropFilter: 'blur(8px)',
+                  border: `1px solid ${catColor}50`,
+                  borderRadius: 5,
+                  padding: '4px 8px',
+                  pointerEvents: 'none',
+                  boxShadow: `0 4px 12px rgba(0,0,0,0.5)`,
+                  whiteSpace: 'nowrap',
+                }}>
+                  <div style={{ fontSize: '0.72rem', fontWeight: 700, color: catColor, textTransform: 'capitalize' }}>
+                    {det.display_name}
+                  </div>
+                  <div style={{ fontSize: '0.6rem', color: 'var(--text-dim)' }}>
+                    {det.object_category} · {Math.round((det.confidence || 0) * 100)}% conf
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        }
+
+        // ─── PERSON ───
         const isHovered = hoveredId === det.global_id;
         const riskColor = RISK_COLORS[det.risk_level] || RISK_COLORS.low;
 

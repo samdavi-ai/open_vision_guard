@@ -5,8 +5,8 @@ import AlertsFeed from './components/AlertsFeed';
 import PersonView from './components/PersonView';
 import './index.css';
 
-const API_BASE = "http://localhost:8080";
-const WS_BASE  = "ws://localhost:8080";
+const API_BASE = `${window.location.protocol}//${window.location.hostname}:8080`;
+const WS_BASE  = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.hostname}:8080`;
 
 export default function App() {
   const [isStreaming, setIsStreaming]   = useState(false);
@@ -51,12 +51,23 @@ export default function App() {
   const handleUpload = async (e) => {
     const file = e.target.files[0];
     if (!file) return;
+    console.log("Uploading file:", file.name, file.size);
     const fd = new FormData(); fd.append('file', file);
     try {
       const r = await fetch(`${API_BASE}/stream/upload`, { method: 'POST', body: fd });
       const d = await r.json();
-      if (d.path) { setSourceData(d.path); setSourceMode('url'); }
-    } catch (err) { console.error(err); }
+      console.log("Upload response:", d);
+      if (d.path) { 
+        setSourceData(d.path); 
+        setSourceMode('url'); 
+        alert(`Successfully uploaded ${file.name}. Click 'Start' to begin monitoring.`);
+      } else {
+        alert("Upload failed: " + (d.error || "Unknown error"));
+      }
+    } catch (err) { 
+      console.error("Upload fetch error:", err); 
+      alert("Upload failed. Check console for details.");
+    }
   };
 
   /* ── Person click handler ── */
