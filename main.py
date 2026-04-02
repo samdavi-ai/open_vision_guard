@@ -1,6 +1,8 @@
+import os
 from fastapi import FastAPI
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 from modules import database
 from routers import stream_router, identity_router, alert_router, search_router, config_router
@@ -35,6 +37,10 @@ app.include_router(alert_router.router)
 app.include_router(search_router.router)
 app.include_router(config_router.router)
 
+frontend_path = os.path.join(os.path.dirname(__file__), "frontend")
+assets_path = os.path.join(frontend_path, "assets")
+if os.path.exists(assets_path):
+    app.mount("/assets", StaticFiles(directory=assets_path), name="assets")
 
 @app.get("/")
 async def root():
@@ -49,8 +55,7 @@ async def root():
 @app.get("/ui")
 async def ui():
     """Serve the OpenVisionGuard frontend dashboard."""
-    import os
-    index_path = os.path.join(os.path.dirname(__file__), "frontend", "index.html")
+    index_path = os.path.join(frontend_path, "index.html")
     return FileResponse(index_path)
 
 

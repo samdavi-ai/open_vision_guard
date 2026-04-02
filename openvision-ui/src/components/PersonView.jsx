@@ -2,7 +2,7 @@ import React, { useEffect, useState, useRef } from 'react';
 import {
   ArrowLeft, Fingerprint, Activity, Package, Clock,
   AlertTriangle, Eye, RefreshCw, Wifi, Shield, Move,
-  LogIn, LogOut, Crosshair, Zap, ChevronRight
+  LogIn, LogOut, Crosshair, Zap, ChevronRight, MapPin
 } from 'lucide-react';
 
 const RISK_COLORS = { low: '#22c55e', medium: '#eab308', high: '#f97316', critical: '#ef4444' };
@@ -241,28 +241,155 @@ export default function PersonView({ globalId, cameraId = 'CAM_01', apiBase, onB
             </div>
           </Card>
 
-          {/* Event Timeline */}
-          <Card icon={<Clock size={12} />} title="EVENT TIMELINE" style={{ flex: 1, minHeight: 0 }}>
-            <div style={{ padding: 10, overflowY: 'auto', flex: 1 }}>
-              {history.length > 0 ? (
-                <div style={{ position: 'relative', paddingLeft: 14 }}>
-                  <div style={{ position: 'absolute', left: 5, top: 0, bottom: 0, width: 1, background: 'rgba(255,255,255,0.06)' }} />
-                  {history.slice(0, 40).map((ev, i) => (
-                    <div key={i} style={{ position: 'relative', marginBottom: 8 }}>
-                      <div style={{ position: 'absolute', left: -13, top: 5, width: 7, height: 7, borderRadius: '50%', background: 'var(--accent)', border: '1.5px solid var(--bg-color)' }} />
-                      <div style={{ fontSize: '0.62rem', color: 'var(--text-dim)' }}>{ev.timestamp ? new Date(ev.timestamp).toLocaleString() : ''}</div>
-                      <div style={{ fontSize: '0.74rem', marginTop: 1 }}>
-                        <span style={{ color: '#60a5fa' }}>{ev.activity || 'Detected'}</span>
-                        {' '}— {ev.camera_id}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              ) : (
-                <span style={{ fontSize: '0.78rem', color: 'var(--text-dim)' }}>No events recorded yet</span>
-              )}
-            </div>
+          {/* Camera Map Timeline */}
+          <Card icon={<MapPin size={12} />} title="CAMERA MAP &amp; TIMELINE" style={{ flex: 1, minHeight: 0, overflow: 'hidden' }}>
+            <CameraMapTimeline history={history} />
           </Card>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ─── CameraMapTimeline ─── */
+
+function CameraMapTimeline({ history }) {
+  if (!history || history.length === 0) {
+    return (
+      <div style={{ padding: 20, textAlign: 'center', color: 'var(--text-dim)', fontSize: '0.78rem' }}>
+        No movement data recorded yet
+      </div>
+    );
+  }
+
+  // Build ordered list of unique cameras (in first-seen order)
+  const seenCams = [];
+  const camSet = new Set();
+  history.forEach(ev => {
+    if (ev.camera_id && !camSet.has(ev.camera_id)) {
+      camSet.add(ev.camera_id);
+      seenCams.push(ev.camera_id);
+    }
+  });
+
+  const lastCam = history[history.length - 1]?.camera_id;
+
+  // ── Camera node row ──
+  const nodeW = 72, nodeH = 38, gap = 36;
+  const svgW = seenCams.length > 1 ? (seenCams.length - 1) * (nodeW + gap) + nodeW : nodeW;
+  const svgH = nodeH + 4;
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
+
+      {/* ── Camera Node Map ── */}
+      <div style={{ padding: '10px 10px 6px', flexShrink: 0 }}>
+        <div style={{ fontSize: '0.58rem', color: 'var(--text-dim)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 8 }}>
+          Movement Path
+        </div>
+        <div style={{ overflowX: 'auto', paddingBottom: 4 }}>
+          <div style={{ position: 'relative', display: 'inline-flex', alignItems: 'center', gap: 0, minWidth: svgW }}>
+            {seenCams.map((cam, i) => {
+              const isLast = cam === lastCam;
+              const isFirst = i === 0;
+              return (
+                <React.Fragment key={cam}>
+                  {/* Connector line */}
+                  {i > 0 && (
+                    <div style={{
+                      width: gap, height: 2,
+                      background: 'linear-gradient(to right, rgba(59,130,246,0.4), rgba(59,130,246,0.2))',
+                      flexShrink: 0, position: 'relative',
+                    }}>
+                      {/* Arrow head */}
+                      <div style={{
+                        position: 'absolute', right: 0, top: '50%', transform: 'translateY(-50%)',
+                        width: 0, height: 0,
+                        borderTop: '4px solid transparent', borderBottom: '4px solid transparent',
+                        borderLeft: '6px solid rgba(59,130,246,0.5)',
+                      }} />
+                    </div>
+                  )}
+                  {/* Camera Node */}
+                  <div style={{
+                    width: nodeW, flexShrink: 0,
+                    background: isLast
+                      ? 'linear-gradient(135deg, rgba(59,130,246,0.25), rgba(139,92,246,0.2))'
+                      : 'rgba(255,255,255,0.04)',
+                    border: `1.5px solid ${isLast ? 'rgba(59,130,246,0.6)' : 'rgba(255,255,255,0.08)'}`,
+                    borderRadius: 7,
+                    padding: '5px 6px',
+                    textAlign: 'center',
+                    boxShadow: isLast ? '0 0 12px rgba(59,130,246,0.25)' : 'none',
+                    transition: 'all 0.3s ease',
+                    position: 'relative',
+                  }}>
+                    {isFirst && (
+                      <div style={{ position: 'absolute', top: -8, left: '50%', transform: 'translateX(-50%)', fontSize: '0.48rem', color: '#22c55e', fontWeight: 700, letterSpacing: '0.04em', whiteSpace: 'nowrap' }}>ENTRY</div>
+                    )}
+                    {isLast && (
+                      <div style={{ position: 'absolute', top: -8, left: '50%', transform: 'translateX(-50%)', fontSize: '0.48rem', color: '#60a5fa', fontWeight: 700, letterSpacing: '0.04em', whiteSpace: 'nowrap' }}>LAST SEEN</div>
+                    )}
+                    <div style={{ fontSize: '0.56rem', color: isLast ? '#93c5fd' : 'var(--text-dim)', marginBottom: 2 }}>📹</div>
+                    <div style={{ fontSize: '0.68rem', fontWeight: 700, color: isLast ? '#fff' : 'var(--text-main)', fontFamily: 'monospace', letterSpacing: '0.02em' }}>{cam}</div>
+                    {isLast && (
+                      <div style={{ width: 6, height: 6, borderRadius: '50%', background: '#22c55e', boxShadow: '0 0 6px #22c55e', animation: 'pulse 2s infinite', margin: '3px auto 0' }} />
+                    )}
+                  </div>
+                </React.Fragment>
+              );
+            })}
+          </div>
+        </div>
+      </div>
+
+      {/* Divider */}
+      <div style={{ height: 1, background: 'rgba(255,255,255,0.05)', flexShrink: 0 }} />
+
+      {/* ── Scrollable Event Log ── */}
+      <div style={{ flex: 1, overflowY: 'auto', padding: '8px 10px', minHeight: 0 }}>
+        <div style={{ fontSize: '0.58rem', color: 'var(--text-dim)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 8 }}>
+          Trace Log — {history.length} events
+        </div>
+        <div style={{ position: 'relative', paddingLeft: 16 }}>
+          {/* Vertical rail */}
+          <div style={{ position: 'absolute', left: 5, top: 4, bottom: 4, width: 1, background: 'rgba(255,255,255,0.06)' }} />
+
+          {history.slice().reverse().slice(0, 60).map((ev, i) => {
+            const isActive = ev.camera_id === lastCam && i === 0;
+            const dotColor = isActive ? '#22c55e' : 'var(--accent)';
+            return (
+              <div key={i} style={{ position: 'relative', marginBottom: 7 }}>
+                {/* Dot */}
+                <div style={{
+                  position: 'absolute', left: -13, top: 5,
+                  width: isActive ? 8 : 6, height: isActive ? 8 : 6,
+                  borderRadius: '50%',
+                  background: dotColor,
+                  border: `1.5px solid var(--bg-color)`,
+                  boxShadow: isActive ? `0 0 6px ${dotColor}` : 'none',
+                  animation: isActive ? 'pulse 2s infinite' : 'none',
+                  transition: 'all 0.3s ease',
+                }} />
+
+                {/* Content */}
+                <div style={{ background: isActive ? 'rgba(34,197,94,0.06)' : 'rgba(0,0,0,0.2)', borderRadius: 5, padding: '4px 7px', border: `1px solid ${isActive ? 'rgba(34,197,94,0.2)' : 'rgba(255,255,255,0.04)'}` }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 1 }}>
+                    <span style={{ fontSize: '0.68rem', fontWeight: 600, fontFamily: 'monospace', color: isActive ? '#93c5fd' : '#60a5fa' }}>
+                      {ev.camera_id}
+                    </span>
+                    <span style={{ fontSize: '0.6rem', color: 'var(--text-dim)' }}>
+                      {ev.timestamp ? new Date(ev.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '—'}
+                    </span>
+                  </div>
+                  <div style={{ fontSize: '0.68rem', color: 'var(--text-main)', textTransform: 'capitalize' }}>
+                    {ev.activity || 'detected'}
+                    {ev.location ? <span style={{ color: 'var(--text-dim)' }}> · {ev.location}</span> : null}
+                  </div>
+                </div>
+              </div>
+            );
+          })}
         </div>
       </div>
     </div>

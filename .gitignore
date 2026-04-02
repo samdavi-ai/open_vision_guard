@@ -34,6 +34,8 @@ backend/uploads/
 openvision-ui/node_modules/
 openvision-ui/dist/
 openvision-ui/.vite/
+node-*.tar.gz
+node-*/
 
 # IDE / OS
 .vscode/

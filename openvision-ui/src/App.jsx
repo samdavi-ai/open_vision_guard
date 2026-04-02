@@ -8,27 +8,55 @@ import './index.css';
 const API_BASE = `${window.location.protocol}//${window.location.hostname}:8080`;
 const WS_BASE  = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.hostname}:8080`;
 
+/* ── Live Clock Hook ── */
+function useLiveClock() {
+  const [now, setNow] = useState(new Date());
+  useEffect(() => {
+    const id = setInterval(() => setNow(new Date()), 1000);
+    return () => clearInterval(id);
+  }, []);
+  return now;
+}
+
 export default function App() {
-  const [isStreaming, setIsStreaming]   = useState(false);
+  const [activeStreams, setActiveStreams] = useState([]);
   const [sourceData,  setSourceData]   = useState('');
   const [sourceMode,  setSourceMode]   = useState('url');
   const [alerts,      setAlerts]       = useState([]);
-  const [fps,         setFps]          = useState(0);
   const [activePerson, setActivePerson] = useState(null); // {globalId, cameraId}
 
-  const alertsWsRef = useRef(null);
+  const now          = useLiveClock();
+  const alertsWsRef  = useRef(null);
   const fileInputRef = useRef(null);
+
+  /* ── Sync active streams with backend ── */
+  const fetchStreams = async () => {
+    try {
+      const r = await fetch(`${API_BASE}/stream/list`);
+      if (r.ok) {
+        const list = await r.json();
+        setActiveStreams(list.filter(s => s.status === 'running' || s.status === 'starting'));
+      }
+    } catch (e) {}
+  };
+
+  useEffect(() => {
+    fetchStreams();
+    const id = setInterval(fetchStreams, 3000);
+    return () => clearInterval(id);
+  }, []);
 
   /* ── Alerts WebSocket ── */
   useEffect(() => {
-    if (!isStreaming) return;
     const ws = new WebSocket(`${WS_BASE}/ws/alerts`);
     alertsWsRef.current = ws;
     ws.onmessage = (e) => {
       try { setAlerts(p => [JSON.parse(e.data), ...p].slice(0, 60)); } catch (_) {}
     };
     return () => ws.close();
-  }, [isStreaming]);
+  }, []);
+
+  const isStreaming = activeStreams.length > 0;
 
   /* ── Stream controls ── */
   const startStream = async (src) => {
@@ -37,26 +65,31 @@ export default function App() {
     try {
       const r = await fetch(`${API_BASE}/stream/start`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ source, camera_id: 'CAM_01' }),
+        body: JSON.stringify({ source }), // Let backend assign camera_id
       });
-      if (r.ok) setIsStreaming(true);
+      if (r.ok) {
+        const d = await r.json();
+        setActiveStreams(prev => [...prev.filter(s => s.camera_id !== d.camera_id), { camera_id: d.camera_id, source, status: 'starting' }]);
+        setSourceData(''); // clear input
+      }
     } catch (e) { console.error(e); }
   };
 
-  const stopStream = async () => {
-    await fetch(`${API_BASE}/stream/stop/CAM_01`, { method: 'POST' });
-    setIsStreaming(false); setAlerts([]); setActivePerson(null);
+  const stopStream = async (cameraId) => {
+    try {
+      await fetch(`${API_BASE}/stream/stop/${cameraId}`, { method: 'POST' });
+      setActiveStreams(prev => prev.filter(s => s.camera_id !== cameraId));
+      if (activePerson?.cameraId === cameraId) setActivePerson(null);
+    } catch (e) {}
   };
 
   const handleUpload = async (e) => {
     const file = e.target.files[0];
     if (!file) return;
-    console.log("Uploading file:", file.name, file.size);
     const fd = new FormData(); fd.append('file', file);
     try {
       const r = await fetch(`${API_BASE}/stream/upload`, { method: 'POST', body: fd });
       const d = await r.json();
-      console.log("Upload response:", d);
       if (d.path) { 
         setSourceData(d.path); 
         setSourceMode('url'); 
@@ -65,14 +98,13 @@ export default function App() {
         alert("Upload failed: " + (d.error || "Unknown error"));
       }
     } catch (err) { 
-      console.error("Upload fetch error:", err); 
       alert("Upload failed. Check console for details.");
     }
   };
 
   /* ── Person click handler ── */
-  const handlePersonClick = (globalId) => {
-    setActivePerson({ globalId, cameraId: 'CAM_01' });
+  const handlePersonClick = (globalId, cameraId) => {
+    setActivePerson({ globalId, cameraId });
   };
 
   /* ────────────────────────────────────────────────
@@ -102,15 +134,19 @@ export default function App() {
           <span style={{ fontSize: '1.05rem', fontWeight: 700, letterSpacing: '-0.01em' }}>OpenVisionGuard</span>
         </div>
         <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
+          {/* Live Clock */}
+          <span style={{ fontSize: '0.78rem', color: 'var(--text-dim)', fontFamily: 'monospace', letterSpacing: '0.04em' }}>
+            🕐 {now.toLocaleTimeString()}
+          </span>
           {isStreaming && (
             <span style={{ fontSize: '0.78rem', color: 'var(--text-dim)' }}>
-              <span style={{ color: 'var(--low)', fontWeight: 600 }}>{fps} FPS</span>
+              <span style={{ color: 'var(--low)', fontWeight: 600 }}>{activeStreams.length} Cameras</span>
               &nbsp;·&nbsp;{alerts.length} alerts
             </span>
           )}
           <div style={S.statusBadge}>
             <div style={{ width: 7, height: 7, borderRadius: '50%', background: isStreaming ? 'var(--low)' : '#475569', alignSelf: 'center', animation: isStreaming ? 'pulse 2s infinite' : 'none' }} />
-            {isStreaming ? 'Processing Active' : 'System Ready'}
+            {isStreaming ? 'Monitoring Active' : 'System Ready'}
           </div>
         </div>
       </header>
@@ -118,82 +154,74 @@ export default function App() {
       {/* Grid: video | alerts */}
       <div style={S.mainGrid}>
 
-        {/* LEFT: Video */}
+        {/* LEFT: Video feeds */}
         <div style={{ ...S.panel, display: 'flex', flexDirection: 'column' }}>
           <div style={S.panelHeader}>
             <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
               <div style={{ width: 7, height: 7, borderRadius: '50%', background: isStreaming ? 'var(--low)' : '#475569', animation: isStreaming ? 'pulse 2s infinite' : 'none' }} />
-              CAM_01 — Live Feed
+              Command Center — {isStreaming ? `${activeStreams.length} Live Feed(s)` : 'No Feeds Active'}
             </span>
             {isStreaming && <span style={{ fontSize: '0.72rem', color: 'var(--text-dim)' }}>Click a person to open full profile</span>}
           </div>
 
-          {/* Video canvas */}
-          <div style={{ flex: 1, background: '#000', position: 'relative', minHeight: 0, overflow: 'hidden' }}>
+          {/* Video canvas (Grid) */}
+          <div style={{ flex: 1, background: '#080c14', position: 'relative', minHeight: 0, overflow: 'hidden' }}>
             {isStreaming ? (
-              <VideoStream wsUrl={`${WS_BASE}/ws/stream/CAM_01`} setFps={setFps} onPersonClick={handlePersonClick} />
+              <VideoGrid streams={activeStreams} stopStream={stopStream} onPersonClick={handlePersonClick} />
             ) : (
               <div style={S.emptyState}>
                 <div style={S.emptyIcon}><Activity size={26} style={{ opacity: 0.4 }} /></div>
-                <div style={{ fontWeight: 600, marginBottom: 4 }}>No Active Stream</div>
+                <div style={{ fontWeight: 600, marginBottom: 4 }}>No Active Streams</div>
                 <div style={{ fontSize: '0.78rem' }}>Choose a source below to start AI monitoring</div>
               </div>
             )}
           </div>
 
           {/* Source controls */}
-          <div style={{ padding: '10px 12px', borderTop: '1px solid var(--border-color)', background: 'rgba(0,0,0,0.2)', flexShrink: 0 }}>
-            {!isStreaming ? (
-              <>
-                {/* Tabs */}
-                <div style={{ display: 'flex', gap: 4, marginBottom: 8 }}>
-                  {[
-                    { mode: 'url',    icon: <Video size={12} />,  label: 'Path / URL' },
-                    { mode: 'upload', icon: <Upload size={12} />, label: 'Upload Video' },
-                    { mode: 'webcam', icon: <Camera size={12} />, label: 'Webcam' },
-                  ].map(t => (
-                    <button key={t.mode} onClick={() => setSourceMode(t.mode)} style={{
-                      ...S.tabBtn,
-                      background: sourceMode === t.mode ? 'var(--accent)' : 'rgba(255,255,255,0.05)',
-                      color: sourceMode === t.mode ? '#fff' : 'var(--text-dim)',
-                      border: `1px solid ${sourceMode === t.mode ? 'var(--accent)' : 'var(--border-color)'}`,
-                    }}>
-                      {t.icon} {t.label}
-                    </button>
-                  ))}
-                </div>
-
-                {sourceMode === 'url' && (
-                  <div style={{ display: 'flex', gap: 6 }}>
-                    <input value={sourceData} onChange={e => setSourceData(e.target.value)}
-                      placeholder="Video path or RTSP URL (e.g. data/uploads/video.mp4)"
-                      style={S.input} onKeyDown={e => e.key === 'Enter' && startStream()} />
-                    <button onClick={() => startStream()} disabled={!sourceData} style={S.primaryBtn}>Start</button>
-                  </div>
-                )}
-                {sourceMode === 'upload' && (
-                  <div onClick={() => fileInputRef.current?.click()} style={S.dropZone}>
-                    <Upload size={18} style={{ opacity: 0.4 }} />
-                    <span style={{ fontSize: '0.82rem' }}>Click to select video file</span>
-                    <span style={{ fontSize: '0.72rem', color: 'var(--text-dim)' }}>MP4, AVI, MOV, MKV</span>
-                    <input ref={fileInputRef} type="file" accept="video/*" onChange={handleUpload} style={{ display: 'none' }} />
-                  </div>
-                )}
-                {sourceMode === 'webcam' && (
-                  <button onClick={() => startStream('0')} style={{ ...S.primaryBtn, width: '100%', justifyContent: 'center', padding: '0.6rem' }}>
-                    <Camera size={15} /> Connect Webcam
+          {activeStreams.length < 4 && (
+            <div style={{ padding: '10px 12px', borderTop: '1px solid var(--border-color)', background: 'rgba(0,0,0,0.2)', flexShrink: 0 }}>
+              {/* Tabs */}
+              <div style={{ display: 'flex', gap: 4, marginBottom: 8 }}>
+                {[
+                  { mode: 'url',    icon: <Video size={12} />,  label: 'Path / URL' },
+                  { mode: 'upload', icon: <Upload size={12} />, label: 'Upload Video' },
+                  { mode: 'webcam', icon: <Camera size={12} />, label: 'Webcam' },
+                ].map(t => (
+                  <button key={t.mode} onClick={() => setSourceMode(t.mode)} style={{
+                    ...S.tabBtn,
+                    background: sourceMode === t.mode ? 'var(--accent)' : 'rgba(255,255,255,0.05)',
+                    color: sourceMode === t.mode ? '#fff' : 'var(--text-dim)',
+                    border: `1px solid ${sourceMode === t.mode ? 'var(--accent)' : 'var(--border-color)'}`,
+                  }}>
+                    {t.icon} {t.label}
                   </button>
-                )}
-              </>
-            ) : (
-              <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-                <div style={{ flex: 1, fontSize: '0.78rem', color: 'var(--text-dim)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                  📹 {sourceData || 'Webcam'}
-                </div>
-                <button onClick={stopStream} style={S.stopBtn}>Stop Stream</button>
+                ))}
+                {isStreaming && <div style={{ marginLeft: 'auto', fontSize: '0.7rem', color: 'var(--text-dim)', alignSelf: 'center' }}>Max 4 concurrent cameras</div>}
               </div>
-            )}
-          </div>
+
+              {sourceMode === 'url' && (
+                <div style={{ display: 'flex', gap: 6 }}>
+                  <input value={sourceData} onChange={e => setSourceData(e.target.value)}
+                    placeholder="Video path or RTSP URL (e.g. data/uploads/video.mp4)"
+                    style={S.input} onKeyDown={e => e.key === 'Enter' && startStream()} />
+                  <button onClick={() => startStream()} disabled={!sourceData} style={S.primaryBtn}>Start Camera</button>
+                </div>
+              )}
+              {sourceMode === 'upload' && (
+                <div onClick={() => fileInputRef.current?.click()} style={S.dropZone}>
+                  <Upload size={18} style={{ opacity: 0.4 }} />
+                  <span style={{ fontSize: '0.82rem' }}>Click to select video file</span>
+                  <span style={{ fontSize: '0.72rem', color: 'var(--text-dim)' }}>MP4, AVI, MOV, MKV</span>
+                  <input ref={fileInputRef} type="file" accept="video/*" onChange={handleUpload} style={{ display: 'none' }} />
+                </div>
+              )}
+              {sourceMode === 'webcam' && (
+                <button onClick={() => startStream('0')} style={{ ...S.primaryBtn, width: '100%', justifyContent: 'center', padding: '0.6rem' }}>
+                  <Camera size={15} /> Connect Webcam
+                </button>
+              )}
+            </div>
+          )}
         </div>
 
         {/* RIGHT: Alerts */}
@@ -222,6 +250,55 @@ export default function App() {
   );
 }
 
+/* ─── Multi-Camera Helper Components ─── */
+function VideoGrid({ streams, stopStream, onPersonClick }) {
+  const count = streams.length;
+  const cols = count === 1 ? '1fr' : '1fr 1fr';
+  const rows = count <= 2 ? '1fr' : '1fr 1fr';
+
+  return (
+    <div style={{ display: 'grid', gridTemplateColumns: cols, gridTemplateRows: rows, gap: 2, width: '100%', height: '100%' }}>
+      {streams.map(stream => (
+        <VideoSlot key={stream.camera_id} stream={stream} stopStream={stopStream} onPersonClick={onPersonClick} />
+      ))}
+    </div>
+  );
+}
+
+function VideoSlot({ stream, stopStream, onPersonClick }) {
+  const [fps, setFps] = useState(0);
+
+  return (
+    <div style={{ position: 'relative', width: '100%', height: '100%', overflow: 'hidden', background: '#000' }}>
+      {/* Overlay header */}
+      <div style={{
+        position: 'absolute', top: 0, left: 0, right: 0, zIndex: 10,
+        padding: '6px 10px', background: 'linear-gradient(to bottom, rgba(0,0,0,0.85), transparent)',
+        display: 'flex', justifyContent: 'space-between', alignItems: 'center', pointerEvents: 'none'
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: '0.68rem', fontWeight: 600, color: '#fff', fontFamily: 'monospace' }}>
+          <div style={{ width: 6, height: 6, borderRadius: '50%', background: 'var(--low)', animation: 'pulse 2s infinite' }} />
+          {stream.camera_id}
+          <span style={{ color: 'var(--text-dim)', fontWeight: 400 }}>|</span>
+          <span style={{ color: 'var(--accent)' }}>{fps} FPS</span>
+        </div>
+        <button
+          onClick={() => stopStream(stream.camera_id)}
+          style={{ ...S.stopBtn, padding: '2px 8px', fontSize: '0.62rem', pointerEvents: 'auto' }}
+        >
+          Close X
+        </button>
+      </div>
+
+      <VideoStream
+        wsUrl={`${WS_BASE}/ws/stream/${stream.camera_id}`}
+        setFps={setFps}
+        onPersonClick={(gid) => onPersonClick(gid, stream.camera_id)}
+      />
+    </div>
+  );
+}
+
 /* ─── Styles ─── */
 const S = {
   header: {
@@ -242,7 +319,7 @@ const S = {
     borderRadius: 999, border: '1px solid var(--border-color)',
   },
   mainGrid: {
-    flex: 1, display: 'grid', gridTemplateColumns: '1fr 320px',
+    flex: 1, display: 'grid', gridTemplateColumns: '1fr 340px',
     gap: 10, padding: 10, minHeight: 0, overflow: 'hidden',
   },
   panel: {

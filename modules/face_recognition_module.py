@@ -1,7 +1,7 @@
 try:
     from deepface import DeepFace
     HAS_DEEPFACE = True
-except ImportError:
+except (ImportError, ValueError, Exception):
     HAS_DEEPFACE = False
 
 import cv2
