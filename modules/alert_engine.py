@@ -29,7 +29,7 @@ class AlertEngine:
         Create a context-aware alert with deduplication.
         Returns the alert dict or None if deduplicated.
         """
-        now = datetime.datetime.now()
+        now = datetime.datetime.now().astimezone()
         now_ts = now.timestamp()
 
         # Deduplication check

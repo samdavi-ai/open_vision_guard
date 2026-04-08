@@ -69,7 +69,7 @@ class EmbeddingEngine:
         
         if best_sim > config.similarity_threshold:
             # Update last seen and potentially refine embedding (moving average)
-            self.registry[best_match_id]['metadata']['last_seen_time'] = datetime.datetime.now().isoformat()
+            self.registry[best_match_id]['metadata']['last_seen_time'] = datetime.datetime.now().astimezone().isoformat()
             # Optional: Smooth embedding
             self.registry[best_match_id]['embedding'] = 0.9 * self.registry[best_match_id]['embedding'] + 0.1 * new_embedding
             # Re-normalize
@@ -80,7 +80,7 @@ class EmbeddingEngine:
         new_id = f"Person_{self.next_id_counter:03d}"
         self.next_id_counter += 1
         
-        now_iso = datetime.datetime.now().isoformat()
+        now_iso = datetime.datetime.now().astimezone().isoformat()
         
         self.registry[new_id] = {
             "global_id": new_id,

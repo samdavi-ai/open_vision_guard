@@ -118,7 +118,7 @@ def save_identity(identity: Dict[str, Any]):
         cursor.execute("SELECT global_id FROM identities WHERE global_id = ?", (identity['global_id'],))
         exists = cursor.fetchone()
         
-        now = datetime.datetime.now().isoformat()
+        now = datetime.datetime.now().astimezone().isoformat()
         metadata_json = json.dumps(identity.get('metadata', {}))
         
         if exists:
@@ -164,7 +164,7 @@ def save_event(event: Dict[str, Any]):
             event.get('camera_id'),
             event.get('activity'),
             event.get('location'),
-            event.get('timestamp') or datetime.datetime.now().isoformat(),
+            event.get('timestamp') or datetime.datetime.now().astimezone().isoformat(),
             event.get('frame_path')
         ))
         conn.commit()
@@ -183,7 +183,7 @@ def save_alert(alert: Dict[str, Any]):
             alert['message'],
             alert['global_id'],
             alert['camera_id'],
-            alert['timestamp'] or datetime.datetime.now().isoformat(),
+            alert['timestamp'] or datetime.datetime.now().astimezone().isoformat(),
             alert.get('thumbnail_path'),
             alert.get('acknowledged', False)
         ))
@@ -201,7 +201,7 @@ def save_detection(det: Dict[str, Any]):
             det.get('material'),
             det.get('confidence'),
             det.get('size'),
-            det.get('timestamp') or datetime.datetime.now().isoformat(),
+            det.get('timestamp') or datetime.datetime.now().astimezone().isoformat(),
             det.get('latitude'),
             det.get('longitude')
         ))
@@ -216,7 +216,7 @@ def save_person_log(log: Dict[str, Any]):
             VALUES (?, ?, ?, ?, ?, ?, ?)
         ''', (
             str(log.get('person_id')),
-            log.get('timestamp') or datetime.datetime.now().isoformat(),
+            log.get('timestamp') or datetime.datetime.now().astimezone().isoformat(),
             log.get('position_x'),
             log.get('position_y'),
             log.get('speed'),
@@ -262,7 +262,7 @@ def save_presence_log(log: Dict[str, Any]):
         ''', (
             str(log.get('person_id')),
             log.get('event_type'),
-            log.get('timestamp') or datetime.datetime.now().isoformat(),
+            log.get('timestamp') or datetime.datetime.now().astimezone().isoformat(),
             log.get('session_duration', 0.0),
             log.get('camera_id', 'CAM_01')
         ))
@@ -280,7 +280,7 @@ def save_face_log(log: Dict[str, Any]):
             str(log.get('person_id')),
             log.get('face_name'),
             log.get('camera_id', 'CAM_01'),
-            log.get('timestamp') or datetime.datetime.now().isoformat(),
+            log.get('timestamp') or datetime.datetime.now().astimezone().isoformat(),
             log.get('confidence', 0.0),
             log.get('crop_path'),
             log.get('match_status', 'unknown')

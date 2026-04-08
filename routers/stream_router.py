@@ -4,7 +4,9 @@ import json
 import os
 import threading
 import time
+import datetime
 import base64
+import numpy as np
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, UploadFile, File
 from fastapi.responses import Response
 from typing import Dict, Any
@@ -188,7 +190,7 @@ def _stream_worker(camera_id: str, source: str):
             "height": annotated.shape[0],
             "detections": detections,
             "fps": int(1.0 / (time.monotonic() - t0 + 0.001)),
-            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "timestamp": datetime.datetime.now().astimezone().isoformat(),
             "latitude": current_loc["latitude"],
             "longitude": current_loc["longitude"]
         })
