@@ -5,6 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from modules import database
+from core.orchestrator import orchestrator
 from routers import stream_router, identity_router, alert_router, search_router, config_router, face_log_router, analytics_router
 
 app = FastAPI(
@@ -25,9 +26,16 @@ app.add_middleware(
 
 @app.on_event("startup")
 async def startup_event():
-    """Initialize database on startup."""
+    """Initialize database and start background orchestrator on startup."""
     database.init_db()
+    orchestrator.start()
     print("OpenVisionGuard started.")
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Clean up background threads on shutdown."""
+    orchestrator.stop()
+    print("OpenVisionGuard stopped.")
 
 
 # Register routers
@@ -51,8 +59,14 @@ async def root():
         "version": "1.0.0",
         "status": "running",
         "docs": "/docs",
-        "ui": "/ui"
+        "ui": "/ui",
+        "health": "/health"
     }
+
+@app.get("/health")
+async def health_check():
+    """Live diagnostics payload returned from the continuous background watchdog."""
+    return orchestrator.get_health()
 
 @app.get("/ui")
 async def ui():
