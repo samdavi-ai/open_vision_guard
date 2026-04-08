@@ -96,11 +96,17 @@ class PresenceTracker:
         if not tracker:
             return None
 
-        # Calculate current total dwell including active session
-        total_dwell = sum(s["duration"] for s in tracker["sessions"] if s["duration"] > 0)
+        # Calculate total dwell: sum completed sessions + live active session
+        completed_dwell = sum(
+            s["duration"] for s in tracker["sessions"]
+            if s["exit"] is not None and s["duration"] > 0
+        )
+        active_dwell = 0.0
         if tracker["is_present"] and tracker["sessions"]:
             active = tracker["sessions"][-1]
-            total_dwell += (tracker["last_seen"] - active["entry"])
+            if active["exit"] is None:
+                active_dwell = tracker["last_seen"] - active["entry"]
+        total_dwell = completed_dwell + active_dwell
 
         return {
             "person_id": person_id,

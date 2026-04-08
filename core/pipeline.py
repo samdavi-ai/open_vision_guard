@@ -205,6 +205,8 @@ class Pipeline:
                 # --- Movement direction & speed ---
                 cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
                 prev = self._prev_centers.get(global_id)
+                speed = 0.0
+                direction = "stationary"
                 if prev:
                     dx = cx - prev["cx"]
                     dy = cy - prev["cy"]
@@ -314,8 +316,9 @@ class Pipeline:
                     })
 
                 # Camera Avoidance
-                dx, dy = (cx - prev["cx"], cy - prev["cy"]) if prev else (0, 0)
-                dir_angle = math.atan2(dy, dx)
+                cam_dx = (cx - prev["cx"]) if prev else 0.0
+                cam_dy = (cy - prev["cy"]) if prev else 0.0
+                dir_angle = math.atan2(cam_dy, cam_dx)
                 avoidance_res = camera_avoidance_detector.update(
                     global_id, (x1, y1, x2, y2), face_visible, dir_angle, orig_w, orig_h, current_time
                 )
@@ -355,19 +358,26 @@ class Pipeline:
         # 7. Presence Tracking
         presence_events = presence_tracker.update(person_ids, current_time)
         for ev in presence_events:
-            # Maybe send alert if exit? Or just save to database
-            database.save_presence_log(ev)
-            if ev["type"] in ("entry", "re-entry", "exit"):
-                pid = ev["person_id"]
-                tr = presence_tracker.get_presence_data(pid)
-                if tr:
-                    freq_data = frequency_analyzer.get_frequency_data(pid)
-                    embedding_engine.update_identity_metadata(pid, {
-                        "dwell_time_seconds": tr["total_dwell_seconds"],
-                        "visit_count": freq_data["visit_count"],
-                        "frequency_label": freq_data["frequency_label"],
-                        "is_present": tr["is_present"]
-                    })
+            # Map field names for database compatibility
+            db_log = {
+                "person_id": ev.get("person_id"),
+                "event_type": ev.get("type"),  # presence tracker uses 'type', DB expects 'event_type'
+                "timestamp": ev.get("timestamp"),
+                "session_duration": ev.get("session_duration", 0.0),
+            }
+            database.save_presence_log(db_log)
+
+        # Update dwell time & frequency for ALL visible persons every frame
+        for pid in person_ids:
+            tr = presence_tracker.get_presence_data(pid)
+            if tr:
+                freq_data = frequency_analyzer.get_frequency_data(pid)
+                embedding_engine.update_identity_metadata(pid, {
+                    "dwell_time_seconds": tr["total_dwell_seconds"],
+                    "visit_count": freq_data["visit_count"],
+                    "frequency_label": freq_data["frequency_label"],
+                    "is_present": tr["is_present"]
+                })
 
         # 8. Luggage Tracking
         OBJECT_CLASSES = {24: "backpack", 26: "handbag", 28: "suitcase"}
@@ -408,25 +418,6 @@ class Pipeline:
                 alert = alert_engine.create_alert(ev["type"], ev.get("owner_id") or ev.get("new_holder") or "Unknown", camera_id, ev, frame)
                 if alert: alerts_list.append(alert)
 
-            # Update detection list with ALL enriched metadata
-            for det in current_detections_list:
-                gid = det["global_id"]
-                identity = embedding_engine.get_identity(gid)
-                if identity:
-                    m = identity['metadata']
-                    det["carried_objects"] = m.get('carried_objects', [])
-                    det["activity"] = m.get('activity', 'unknown')
-                    det["risk_level"] = m.get('risk_level', 'low')
-                    det["risk_score"] = m.get('risk_score', 0)
-                    det["behaviour_label"] = m.get('behaviour_label', 'normal')
-                    det["movement_direction"] = m.get('movement_direction', 'stationary')
-                    det["speed"] = m.get('speed', 0.0)
-                    det["pose_detail"] = m.get('pose_detail', 'unknown')
-                    det["entry_time"] = m.get('entry_time')
-                    det["exit_time"] = m.get('exit_time')
-                    det["object_log"] = m.get('object_log', [])
-                    det["face_name"] = m.get('face_name')
-
         # 9. Weapon Detection (full frame)
         if config.weapon_detection_enabled:
             weapons = self.weapon_detector.detect_weapons(frame, person_boxes, person_ids)
@@ -439,7 +430,6 @@ class Pipeline:
                     alerts_list.append(alert)
 
         # 10. Risk Engine & Following Check
-        # Check following behaviour
         person_positions = {}
         for pbox, pid in zip(person_boxes, person_ids):
             px1, py1, px2, py2 = map(int, pbox)
@@ -457,7 +447,6 @@ class Pipeline:
             if not identity_data: continue
             m = identity_data['metadata']
             
-            # Gather signals
             signals = {
                 "weapon_proximity": m.get("risk_level") == "critical",
                 "loitering": m.get("activity") == "loitering",
@@ -476,7 +465,6 @@ class Pipeline:
                 avoidance_score=m.get("avoidance_score", 0.0)
             )
             
-            # If they just entered, their score might only be slightly elevated.
             embedding_engine.update_identity_metadata(pid, {
                 "risk_score": risk_res["risk_score"],
                 "risk_level": risk_res["risk_level"],
@@ -487,7 +475,7 @@ class Pipeline:
                 alert = alert_engine.create_alert("high_risk", pid, camera_id, risk_res, frame)
                 if alert: alerts_list.append(alert)
 
-        # 9. Motion / Zone breach
+        # 11. Motion / Zone breach
         zones = self.camera_zones.get(camera_id, [])
         motion_result = self.motion_detector.detect_motion(frame, zones)
         if motion_result["active_zones"]:
@@ -498,6 +486,35 @@ class Pipeline:
                 )
                 if alert:
                     alerts_list.append(alert)
+
+        # 12. FINAL — Enrich ALL detection dicts with complete metadata for frontend
+        for det in current_detections_list:
+            if det.get("is_object"):
+                continue
+            gid = det["global_id"]
+            identity = embedding_engine.get_identity(gid)
+            if identity:
+                m = identity['metadata']
+                det["carried_objects"] = m.get('carried_objects', [])
+                det["activity"] = m.get('activity', 'unknown')
+                det["risk_level"] = m.get('risk_level', 'low')
+                det["risk_score"] = m.get('risk_score', 0)
+                det["behaviour_label"] = m.get('behaviour_label', 'normal')
+                det["behaviour_score"] = m.get('behaviour_score', 0.0)
+                det["movement_direction"] = m.get('movement_direction', 'stationary')
+                det["speed"] = m.get('speed', 0.0)
+                det["pose_detail"] = m.get('pose_detail', 'unknown')
+                det["entry_time"] = m.get('entry_time')
+                det["exit_time"] = m.get('exit_time')
+                det["object_log"] = m.get('object_log', [])
+                det["face_name"] = m.get('face_name')
+                det["avoidance_score"] = m.get('avoidance_score', 0.0)
+                det["avoidance_flags"] = m.get('avoidance_flags', [])
+                det["risk_factors"] = m.get('risk_factors', [])
+                det["dwell_time_seconds"] = m.get('dwell_time_seconds', 0.0)
+                det["frequency_label"] = m.get('frequency_label', 'new')
+                det["visit_count"] = m.get('visit_count', 1)
+                det["luggage_status"] = m.get('luggage_status', {})
 
         result.annotated_frame = annotated_frame
         result.identities = embedding_engine.get_all_identities()
