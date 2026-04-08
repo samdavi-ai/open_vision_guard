@@ -31,7 +31,32 @@ class IdentityMetadata(BaseModel):
     carried_objects: Optional[List[str]] = []   # ["backpack", "suitcase"]
     object_log: Optional[List[Dict[str, Any]]] = []  # [{object, action, timestamp}]
     zone_history: Optional[List[str]] = []     # camera zones visited
+    latitude: Optional[float] = None           # GPS tracking
+    longitude: Optional[float] = None          # GPS tracking
     total_appearances: Optional[int] = 0
+
+    # ── Behaviour Analysis ──
+    behaviour_label: Optional[str] = None         # "normal_walking", "pacing", "erratic_movement", etc.
+    behaviour_score: Optional[float] = 0.0         # 0-100 abnormality score
+
+    # ── Risk Engine (composite) ──
+    risk_score: Optional[float] = 0.0             # composite 0-100
+    risk_factors: Optional[List[str]] = []         # ["weapon_proximity", "loitering", ...]
+
+    # ── Luggage ──
+    luggage_status: Optional[Dict[str, Any]] = {}  # {luggage_id: {status, owner, type}}
+
+    # ── Presence ──
+    dwell_time_seconds: Optional[float] = 0.0
+    visit_count: Optional[int] = 0
+    is_present: Optional[bool] = True
+
+    # ── Camera Avoidance ──
+    avoidance_score: Optional[float] = 0.0
+    avoidance_flags: Optional[List[str]] = []      # ["face_hidden", "edge_hugging", ...]
+
+    # ── Frequency ──
+    frequency_label: Optional[str] = "new"         # "new", "rare", "occasional", "frequent", "regular"
 
 
 

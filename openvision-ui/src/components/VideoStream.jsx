@@ -10,6 +10,7 @@ export default function VideoStream({ wsUrl, setFps, onPersonClick }) {
   const [dims, setDims]            = useState({ w: 1, h: 1 });
   const [imgBox, setImgBox]        = useState(null);
   const [hoveredId, setHoveredId]  = useState(null);
+  const [streamMeta, setStreamMeta] = useState({ timestamp: null, lat: null, lon: null });
 
   const wsRef        = useRef(null);
   const containerRef = useRef(null);
@@ -32,6 +33,7 @@ export default function VideoStream({ wsUrl, setFps, onPersonClick }) {
       setFrameSrc(`data:image/jpeg;base64,${d.frame}`);
       setDims({ w: d.width || 1, h: d.height || 1 });
       setDetections(d.detections || []);
+      setStreamMeta({ timestamp: d.timestamp, lat: d.latitude, lon: d.longitude });
     };
     return () => ws.close();
   }, [wsUrl]);
@@ -93,6 +95,27 @@ export default function VideoStream({ wsUrl, setFps, onPersonClick }) {
           onLoad={measureImage}
           style={{ display: 'block', maxWidth: '100%', maxHeight: '100%', objectFit: 'contain' }}
         />
+      )}
+
+      {/* Stream Metadata HUD */}
+      {streamMeta.timestamp && (
+        <div style={{
+          position: 'absolute', top: 12, left: 12, zIndex: 40,
+          background: 'rgba(8,15,30,0.85)', backdropFilter: 'blur(8px)',
+          border: '1px solid rgba(255,255,255,0.1)', borderRadius: 6,
+          padding: '6px 10px', color: 'var(--text-main)', fontSize: '0.68rem',
+          display: 'flex', flexDirection: 'column', gap: 4, pointerEvents: 'none',
+          boxShadow: '0 4px 12px rgba(0,0,0,0.5)'
+        }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12 }}>
+            <span style={{ color: 'var(--text-dim)' }}>TIME</span>
+            <span style={{ fontFamily: 'monospace', fontWeight: 600 }}>{new Date(streamMeta.timestamp).toLocaleString()}</span>
+          </div>
+          <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12 }}>
+            <span style={{ color: 'var(--text-dim)' }}>GEO</span>
+            <span style={{ fontFamily: 'monospace', fontWeight: 600, color: '#60a5fa' }}>{streamMeta.lat?.toFixed(4)}, {streamMeta.lon?.toFixed(4)}</span>
+          </div>
+        </div>
       )}
 
       {/* Detection overlays */}
@@ -194,14 +217,14 @@ export default function VideoStream({ wsUrl, setFps, onPersonClick }) {
                 </div>
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '2px 8px', fontSize: '0.62rem' }}>
                   <span style={{ color: 'var(--text-dim)' }}>Risk</span>
-                  <span style={{ color: riskColor, fontWeight: 600, textTransform: 'uppercase' }}>{det.risk_level || 'low'}</span>
-                  <span style={{ color: 'var(--text-dim)' }}>Pose</span>
-                  <span style={{ color: '#60a5fa', textTransform: 'capitalize' }}>{det.pose_detail || det.activity || '—'}</span>
+                  <span style={{ color: riskColor, fontWeight: 600, textTransform: 'uppercase' }}>{Math.round(det.risk_score || 0)}/100 · {det.risk_level || 'low'}</span>
+                  <span style={{ color: 'var(--text-dim)' }}>Act</span>
+                  <span style={{ color: '#60a5fa', textTransform: 'capitalize' }}>{det.behaviour_label ? det.behaviour_label.replace(/_/g, ' ') : (det.pose_detail || det.activity || '—')}</span>
                   <span style={{ color: 'var(--text-dim)' }}>Move</span>
                   <span>{DIR_ARROWS[det.movement_direction] || '•'} {det.movement_direction || 'still'}</span>
                   {det.carried_objects?.length > 0 && <>
-                    <span style={{ color: 'var(--text-dim)' }}>Objects</span>
-                    <span style={{ color: '#a78bfa' }}>{det.carried_objects.join(', ')}</span>
+                    <span style={{ color: 'var(--text-dim)' }}>Luggage</span>
+                    <span style={{ color: '#a78bfa', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{det.carried_objects.join(', ')}</span>
                   </>}
                 </div>
               </div>

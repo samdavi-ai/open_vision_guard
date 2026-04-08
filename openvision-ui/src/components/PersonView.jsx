@@ -128,6 +128,21 @@ export default function PersonView({ globalId, cameraId = 'CAM_01', apiBase, onB
               </div>
             </div>
           </Card>
+
+          {/* Behaviour Analysis */}
+          <Card icon={<Activity size={12} />} title="BEHAVIOUR ANALYSIS">
+            <div style={{ padding: 10 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                <span style={{ fontSize: '0.78rem', fontWeight: 600, color: 'var(--text-main)', textTransform: 'capitalize' }}>
+                  {m.behaviour_label ? m.behaviour_label.replace('_', ' ') : 'Normal walking'}
+                </span>
+                <span style={{ fontSize: '0.85rem', fontWeight: 700, color: m.behaviour_score > 50 ? '#ef4444' : '#22c55e' }}>
+                  {Math.round(m.behaviour_score || 0)} / 100
+                </span>
+              </div>
+              <ThreatBar label="Abnormality Level" level={m.behaviour_score || 0} color={m.behaviour_score > 50 ? '#ef4444' : '#eab308'} />
+            </div>
+          </Card>
         </div>
 
         {/* ═══ CENTER COLUMN: Identity + Threat + Objects ═══ */}
@@ -141,9 +156,10 @@ export default function PersonView({ globalId, cameraId = 'CAM_01', apiBase, onB
                   <InfoCell label="Name" value={m.face_name || 'Unknown'} wide />
                   <InfoCell label="Global ID" value={globalId} mono />
                   <InfoCell label="Camera" value={m.last_seen_camera || '—'} />
-                  <InfoCell label="Last Seen" value={m.last_seen_time ? new Date(m.last_seen_time).toLocaleTimeString() : '—'} />
+                  <InfoCell label="Last Seen" value={m.last_seen_time ? new Date(m.last_seen_time).toLocaleString() : '—'} />
+                  <InfoCell label="Location" value={m.latitude && m.longitude ? `${m.latitude.toFixed(6)}, ${m.longitude.toFixed(6)}` : '—'} />
                   <InfoCell label="Appearances" value={m.total_appearances || history.length || 0} />
-                  <InfoCell label="Clothing" value={m.clothing_color || 'N/A'} />
+                  <InfoCell label="Clothing" value={m.clothing_color || 'N/A'} wide />
                 </div>
               )}
             </div>
@@ -158,44 +174,48 @@ export default function PersonView({ globalId, cameraId = 'CAM_01', apiBase, onB
                   background: rg, border: `1.5px solid ${rc}50`,
                   display: 'flex', alignItems: 'center', justifyContent: 'center',
                   color: rc, fontWeight: 800, fontSize: '0.8rem', textTransform: 'uppercase'
-                }}>{risk}</div>
+                }}>{Math.round(m.risk_score || 0)}</div>
                 <div style={{ flex: 1 }}>
                   <div style={{ fontSize: '0.78rem', fontWeight: 600, textTransform: 'uppercase', color: rc }}>{risk} Risk Level</div>
                   <div style={{ fontSize: '0.68rem', color: 'var(--text-dim)', marginTop: 2 }}>
-                    {risk === 'critical' && '⚠ Armed / dangerous individual'}
-                    {risk === 'high' && '⚠ Suspicious behavior detected'}
-                    {risk === 'medium' && 'Potential loitering or unusual activity'}
-                    {risk === 'low' && 'No threats detected — normal behavior'}
+                    Composite threat score based on all signals
                   </div>
                 </div>
               </div>
-              <ThreatBar label="Weapon" level={risk === 'critical' ? 95 : 0} color="#ef4444" />
-              <ThreatBar label="Loitering" level={m.activity === 'loitering' ? 70 : (personAlerts.some(a => a.type === 'loitering') ? 50 : 5)} color="#eab308" />
-              <ThreatBar label="Suspicious" level={risk === 'high' ? 60 : risk === 'medium' ? 30 : 5} color="#f97316" />
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                {m.risk_factors?.length > 0 ? (
+                  m.risk_factors.map(f => <span key={f} style={{...S.tag, background: 'rgba(239,68,68,0.1)', color: '#ef4444'}}>⚠ {f.replace(/_/g, ' ')}</span>)
+                ) : (
+                  <span style={{ fontSize: '0.78rem', color: 'var(--text-dim)' }}>No active risk factors</span>
+                )}
+              </div>
             </div>
           </Card>
 
-          {/* Carried Objects */}
-          <Card icon={<Package size={12} />} title="CARRIED OBJECTS">
+          {/* Camera Avoidance */}
+          <Card icon={<Eye size={12} />} title="CAMERA AVOIDANCE" accent="#f59e0b">
             <div style={{ padding: 10 }}>
-              {m.carried_objects?.length > 0 ? (
-                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                  {m.carried_objects.map((o, i) => <span key={i} style={S.tag}>🎒 {o}</span>)}
-                </div>
-              ) : (
-                <span style={{ fontSize: '0.78rem', color: 'var(--text-dim)' }}>No objects detected</span>
-              )}
-              {/* Object acquisition log */}
-              {m.object_log?.length > 0 && (
-                <div style={{ marginTop: 8, borderTop: '1px solid rgba(255,255,255,0.06)', paddingTop: 8 }}>
-                  <div style={{ fontSize: '0.62rem', color: 'var(--text-dim)', textTransform: 'uppercase', marginBottom: 4 }}>Acquisition Log</div>
-                  {m.object_log.map((entry, i) => (
-                    <div key={i} style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.72rem', padding: '3px 0', borderBottom: '1px solid rgba(255,255,255,0.03)' }}>
-                      <span><span style={{ color: '#60a5fa' }}>{entry.action}</span> {entry.object}</span>
-                      <span style={{ color: 'var(--text-dim)' }}>{entry.timestamp ? new Date(entry.timestamp).toLocaleTimeString() : ''}</span>
+              <ThreatBar label="Avoidance Score" level={m.avoidance_score || 0} color="#f59e0b" />
+              <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginTop: 4 }}>
+                {m.avoidance_flags?.map(f => <span key={f} style={{...S.tag, background: 'rgba(245,158,11,0.1)', color: '#f59e0b'}}>{f.replace(/_/g, ' ')}</span>)}
+              </div>
+            </div>
+          </Card>
+
+          {/* Luggage Ownership */}
+          <Card icon={<Package size={12} />} title="LUGGAGE TRACKING">
+            <div style={{ padding: 10 }}>
+              {m.luggage_status && Object.keys(m.luggage_status).length > 0 ? (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                  {Object.entries(m.luggage_status).map(([lid, l]) => (
+                    <div key={lid} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '6px 8px', background: 'rgba(255,255,255,0.03)', borderRadius: 5, border: '1px solid rgba(255,255,255,0.05)' }}>
+                      <span style={{ fontSize: '0.78rem', textTransform: 'capitalize' }}>🎒 {l.type}</span>
+                      <span style={{ fontSize: '0.7rem', color: l.status === 'abandoned' ? '#ef4444' : l.status === 'carried' ? '#22c55e' : '#f97316', fontWeight: 600 }}>{l.status}</span>
                     </div>
                   ))}
                 </div>
+              ) : (
+                <span style={{ fontSize: '0.78rem', color: 'var(--text-dim)' }}>No luggage tracked</span>
               )}
             </div>
           </Card>
@@ -204,18 +224,15 @@ export default function PersonView({ globalId, cameraId = 'CAM_01', apiBase, onB
         {/* ═══ RIGHT COLUMN: Entry/Exit + Alerts + Timeline ═══ */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8, minHeight: 0 }}>
 
-          {/* Entry / Exit Log */}
-          <Card icon={<LogIn size={12} />} title="ENTRY / EXIT LOG">
+          {/* Presence & Frequency */}
+          <Card icon={<LogIn size={12} />} title="PRESENCE &amp; FREQUENCY">
             <div style={{ padding: 10 }}>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
-                <InfoCell label="Entry Time" value={m.entry_time ? new Date(m.entry_time).toLocaleTimeString() : '—'} icon={<LogIn size={10} color="#22c55e" />} />
-                <InfoCell label="Last Seen" value={m.exit_time ? new Date(m.exit_time).toLocaleTimeString() : '—'} icon={<LogOut size={10} color="#f97316" />} />
-                <InfoCell label="Duration" value={
-                  m.entry_time && m.exit_time
-                    ? formatDuration(new Date(m.exit_time) - new Date(m.entry_time))
-                    : '—'
-                } />
-                <InfoCell label="Camera" value={m.last_seen_camera || '—'} />
+                <InfoCell label="Dwell Time" value={formatDuration((m.dwell_time_seconds || 0) * 1000)} icon={<Clock size={10} />} />
+                <InfoCell label="Visits" value={m.visit_count || 1} />
+                <InfoCell label="Frequency" value={m.frequency_label || 'new'} color="#60a5fa" wide />
+                <InfoCell label="Entry Time" value={m.entry_time ? new Date(m.entry_time).toLocaleTimeString() : '—'} />
+                <InfoCell label="Last Seen" value={m.exit_time ? new Date(m.exit_time).toLocaleTimeString() : '—'} />
               </div>
             </div>
           </Card>

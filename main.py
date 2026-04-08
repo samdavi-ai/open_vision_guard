@@ -5,7 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from modules import database
-from routers import stream_router, identity_router, alert_router, search_router, config_router
+from routers import stream_router, identity_router, alert_router, search_router, config_router, face_log_router, analytics_router
 
 app = FastAPI(
     title="OpenVisionGuard",
@@ -36,6 +36,8 @@ app.include_router(identity_router.router)
 app.include_router(alert_router.router)
 app.include_router(search_router.router)
 app.include_router(config_router.router)
+app.include_router(face_log_router.router)
+app.include_router(analytics_router.router)
 
 frontend_path = os.path.join(os.path.dirname(__file__), "frontend")
 assets_path = os.path.join(frontend_path, "assets")

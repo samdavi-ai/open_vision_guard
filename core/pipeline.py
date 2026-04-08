@@ -13,6 +13,18 @@ from modules.motion_detector import MotionDetector
 from modules.weapon_detector import WeaponDetector
 from modules.alert_engine import alert_engine
 from modules import database
+from modules.geolocation import geolocation_engine
+import math
+import os
+import uuid
+
+from modules.behaviour_analyzer import behaviour_analyzer
+from modules.risk_engine import risk_engine
+from modules.luggage_tracker import luggage_tracker
+from modules.presence_tracker import presence_tracker
+from modules.sudden_movement_detector import sudden_movement_detector
+from modules.camera_avoidance_detector import camera_avoidance_detector
+from modules.frequency_analyzer import frequency_analyzer
 
 
 @dataclass
@@ -99,6 +111,8 @@ class Pipeline:
         alerts_list = []
         current_detections_list = []
         current_time = time.time()
+        now_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ")
+        current_location = geolocation_engine.get_current_location()
 
         # 1. YOLOv8n Detection + Tracking (ALL classes)
         # Using 640px for accuracy (standard) + lower conf to catch "every person".
@@ -156,6 +170,19 @@ class Pipeline:
                         "object_class": class_name,
                         "object_category": category,
                         "confidence": round(float(conf), 2),
+                        "timestamp": now_iso,
+                        "latitude": current_location["latitude"],
+                        "longitude": current_location["longitude"]
+                    })
+                    
+                    database.save_detection({
+                        "object_id": obj_id,
+                        "material": class_name,
+                        "confidence": float(conf),
+                        "size": f"{int(x2-x1)}x{int(y2-y1)}",
+                        "timestamp": now_iso,
+                        "latitude": current_location["latitude"],
+                        "longitude": current_location["longitude"]
                     })
                     continue
 
@@ -171,6 +198,8 @@ class Pipeline:
                     "last_seen_camera": camera_id,
                     "last_seen_time": now_iso,
                     "exit_time": now_iso,  # continuously update exit time
+                    "latitude": current_location["latitude"],
+                    "longitude": current_location["longitude"]
                 })
 
                 # --- Movement direction & speed ---
@@ -190,8 +219,28 @@ class Pipeline:
                     embedding_engine.update_identity_metadata(global_id, {
                         "movement_direction": direction,
                         "speed": round(speed, 1),
+                        "latitude": current_location["latitude"],
+                        "longitude": current_location["longitude"]
                     })
                 self._prev_centers[global_id] = {"cx": cx, "cy": cy, "t": current_time}
+
+                # --- Intelligence Modules ---
+                
+                # Frequency
+                frequency_analyzer.record_appearance(global_id, current_time)
+                
+                # Behaviour
+                behaviour_res = behaviour_analyzer.update(global_id, cx, cy, speed, current_time)
+                embedding_engine.update_identity_metadata(global_id, {
+                    "behaviour_label": behaviour_res["behaviour_label"],
+                    "behaviour_score": behaviour_res["behaviour_score"]
+                })
+                
+                # Sudden Movement
+                sudden_res = sudden_movement_detector.update(global_id, speed, current_time)
+                if sudden_res:
+                    alert = alert_engine.create_alert("sudden_movement", global_id, camera_id, sudden_res, frame)
+                    if alert: alerts_list.append(alert)
 
                 # Store scaled int coords (same space as current_detections_list)
                 person_boxes.append([x1, y1, x2, y2])
@@ -211,13 +260,69 @@ class Pipeline:
                     "is_object": False,
                     "object_class": "person",
                     "object_category": "person",
+                    "timestamp": now_iso,
+                    "latitude": current_location["latitude"],
+                    "longitude": current_location["longitude"]
+                })
+                
+                # Save detection to DB
+                database.save_detection({
+                    "object_id": global_id,
+                    "material": "person",
+                    "confidence": float(conf),
+                    "size": f"{int(x2-x1)}x{int(y2-y1)}",
+                    "timestamp": now_iso,
+                    "latitude": current_location["latitude"],
+                    "longitude": current_location["longitude"]
+                })
+                
+                # Save person log
+                event_type = "moving"
+                if prev:
+                    event_type = "idle" if direction == "stationary" else "moving"
+                database.save_person_log({
+                    "person_id": global_id,
+                    "timestamp": now_iso,
+                    "position_x": cx,
+                    "position_y": cy,
+                    "speed": speed if prev else 0.0,
+                    "zone": "General", 
+                    "event_type": event_type
                 })
                             
                 # 3. Face Recognition (if face visible)
+                face_visible = False
                 if config.face_recognition_enabled and (y2 - y1) > config.min_face_height_px:
+                    face_visible = True
                     name = self.face_module.recognize_face(crop)
                     if name:
                         embedding_engine.update_identity_metadata(global_id, {"face_name": name})
+                        
+                    # Face Logging
+                    crop_filename = f"{uuid.uuid4()}.jpg"
+                    crop_dir = "data/face_crops"
+                    os.makedirs(crop_dir, exist_ok=True)
+                    crop_path = os.path.join(crop_dir, crop_filename)
+                    cv2.imwrite(crop_path, crop)
+                    database.save_face_log({
+                        "person_id": global_id,
+                        "face_name": name or "Unknown",
+                        "camera_id": camera_id,
+                        "timestamp": now_iso,
+                        "crop_path": crop_path,
+                        "match_status": "known" if name else "unknown"
+                    })
+
+                # Camera Avoidance
+                dx, dy = (cx - prev["cx"], cy - prev["cy"]) if prev else (0, 0)
+                dir_angle = math.atan2(dy, dx)
+                avoidance_res = camera_avoidance_detector.update(
+                    global_id, (x1, y1, x2, y2), face_visible, dir_angle, orig_w, orig_h, current_time
+                )
+                embedding_engine.update_identity_metadata(global_id, {
+                    "avoidance_score": avoidance_res["avoidance_score"],
+                    "avoidance_flags": avoidance_res["avoidance_behaviours"]
+                })
 
                 # 4. Pose & Activity
                 if config.pose_enabled:
@@ -247,8 +352,24 @@ class Pipeline:
                     "metadata": identity_data['metadata'] if identity_data else {}
                 })
 
-        # 7. Object/Bag Possession Tracking
-        # COCO classes: backpack=24, handbag=26, suitcase=28
+        # 7. Presence Tracking
+        presence_events = presence_tracker.update(person_ids, current_time)
+        for ev in presence_events:
+            # Maybe send alert if exit? Or just save to database
+            database.save_presence_log(ev)
+            if ev["type"] in ("entry", "re-entry", "exit"):
+                pid = ev["person_id"]
+                tr = presence_tracker.get_presence_data(pid)
+                if tr:
+                    freq_data = frequency_analyzer.get_frequency_data(pid)
+                    embedding_engine.update_identity_metadata(pid, {
+                        "dwell_time_seconds": tr["total_dwell_seconds"],
+                        "visit_count": freq_data["visit_count"],
+                        "frequency_label": freq_data["frequency_label"],
+                        "is_present": tr["is_present"]
+                    })
+
+        # 8. Luggage Tracking
         OBJECT_CLASSES = {24: "backpack", 26: "handbag", 28: "suitcase"}
         if yolo_results[0].boxes is not None:
             all_boxes = yolo_results[0].boxes.xyxy.cpu().numpy()
@@ -266,49 +387,26 @@ class Pipeline:
                         "bbox": [ox1, oy1, ox2, oy2]
                     })
 
-            # Link objects to nearest person
-            for obj in object_detections:
-                min_dist = float('inf')
-                nearest_pid = None
-                for pbox, pid in zip(person_boxes, person_ids):
-                    px1, py1, px2, py2 = map(int, pbox)
-                    pcx = (px1 + px2) / 2
-                    pcy = (py1 + py2) / 2
-                    dist = ((obj["center"][0] - pcx)**2 + (obj["center"][1] - pcy)**2)**0.5
-                    if dist < min_dist and dist < 200:  # Max 200px linkage
-                        min_dist = dist
-                        nearest_pid = pid
+            # Create person positions map
+            person_positions = {}
+            for pbox, pid in zip(person_boxes, person_ids):
+                px1, py1, px2, py2 = map(int, pbox)
+                person_positions[pid] = ((px1 + px2) / 2, (py1 + py2) / 2)
 
-                if nearest_pid:
-                    identity = embedding_engine.get_identity(nearest_pid)
-                    if identity:
-                        prev_objects = set(identity['metadata'].get('carried_objects', []))
-                        new_obj = obj["type"]
-                        if new_obj not in prev_objects:
-                            # Person acquired a new object
-                            prev_objects.add(new_obj)
-                            # Log the acquisition event
-                            identity_obj_log = list(identity['metadata'].get('object_log', []))
-                            identity_obj_log.append({
-                                "object": new_obj,
-                                "action": "acquired",
-                                "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ")
-                            })
-                            embedding_engine.update_identity_metadata(nearest_pid, {
-                                "carried_objects": list(prev_objects),
-                                "object_log": identity_obj_log,
-                            })
-                            if len(prev_objects) > 1:
-                                alert = alert_engine.create_alert(
-                                    "object_acquired", nearest_pid, camera_id,
-                                    {"object": new_obj}, frame
-                                )
-                                if alert:
-                                    alerts_list.append(alert)
-                        else:
-                            embedding_engine.update_identity_metadata(nearest_pid, {
-                                "carried_objects": list(prev_objects)
-                            })
+            luggage_result = luggage_tracker.update(object_detections, person_positions, current_time)
+            
+            # Update person metadata with their luggage
+            for pid in person_ids:
+                pes_luggage = luggage_tracker.get_person_luggage(pid)
+                carried = [l["type"] for l in pes_luggage.values() if l["status"] == "carried"]
+                embedding_engine.update_identity_metadata(pid, {
+                    "carried_objects": carried,
+                    "luggage_status": pes_luggage
+                })
+
+            for ev in luggage_result["events"]:
+                alert = alert_engine.create_alert(ev["type"], ev.get("owner_id") or ev.get("new_holder") or "Unknown", camera_id, ev, frame)
+                if alert: alerts_list.append(alert)
 
             # Update detection list with ALL enriched metadata
             for det in current_detections_list:
@@ -319,6 +417,8 @@ class Pipeline:
                     det["carried_objects"] = m.get('carried_objects', [])
                     det["activity"] = m.get('activity', 'unknown')
                     det["risk_level"] = m.get('risk_level', 'low')
+                    det["risk_score"] = m.get('risk_score', 0)
+                    det["behaviour_label"] = m.get('behaviour_label', 'normal')
                     det["movement_direction"] = m.get('movement_direction', 'stationary')
                     det["speed"] = m.get('speed', 0.0)
                     det["pose_detail"] = m.get('pose_detail', 'unknown')
@@ -327,7 +427,7 @@ class Pipeline:
                     det["object_log"] = m.get('object_log', [])
                     det["face_name"] = m.get('face_name')
 
-        # 8. Weapon Detection (full frame)
+        # 9. Weapon Detection (full frame)
         if config.weapon_detection_enabled:
             weapons = self.weapon_detector.detect_weapons(frame, person_boxes, person_ids)
             for w in weapons:
@@ -337,6 +437,55 @@ class Pipeline:
                 alert = alert_engine.create_alert("weapon", pid or "Unknown", camera_id, w, frame)
                 if alert:
                     alerts_list.append(alert)
+
+        # 10. Risk Engine & Following Check
+        # Check following behaviour
+        person_positions = {}
+        for pbox, pid in zip(person_boxes, person_ids):
+            px1, py1, px2, py2 = map(int, pbox)
+            person_positions[pid] = ((px1 + px2) / 2, (py1 + py2) / 2)
+            
+        following_pairs = behaviour_analyzer.check_following(person_positions)
+        following_pids = set()
+        for pair in following_pairs:
+            following_pids.add(pair["follower_id"])
+            alert = alert_engine.create_alert("following", pair["follower_id"], camera_id, pair, frame)
+            if alert: alerts_list.append(alert)
+        
+        for pid in person_ids:
+            identity_data = embedding_engine.get_identity(pid)
+            if not identity_data: continue
+            m = identity_data['metadata']
+            
+            # Gather signals
+            signals = {
+                "weapon_proximity": m.get("risk_level") == "critical",
+                "loitering": m.get("activity") == "loitering",
+                "unknown_face": m.get("face_name") is None,
+                "high_frequency": frequency_analyzer.is_frequent(pid),
+                "following_someone": pid in following_pids,
+                "prolonged_stillness": m.get("behaviour_label") == "prolonged_stillness",
+                "pacing": m.get("behaviour_label") == "pacing",
+                "circle_walking": m.get("behaviour_label") == "circle_walking",
+                "running": m.get("behaviour_label") == "running",
+            }
+            
+            risk_res = risk_engine.compute_risk(
+                pid, signals, 
+                behaviour_score=m.get("behaviour_score", 0.0),
+                avoidance_score=m.get("avoidance_score", 0.0)
+            )
+            
+            # If they just entered, their score might only be slightly elevated.
+            embedding_engine.update_identity_metadata(pid, {
+                "risk_score": risk_res["risk_score"],
+                "risk_level": risk_res["risk_level"],
+                "risk_factors": risk_res["risk_factors"]
+            })
+            
+            if risk_engine.should_alert(pid, threshold=70.0):
+                alert = alert_engine.create_alert("high_risk", pid, camera_id, risk_res, frame)
+                if alert: alerts_list.append(alert)
 
         # 9. Motion / Zone breach
         zones = self.camera_zones.get(camera_id, [])

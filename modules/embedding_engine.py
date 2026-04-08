@@ -100,6 +100,8 @@ class EmbeddingEngine:
                 "carried_objects": [],
                 "object_log": [],
                 "zone_history": [],
+                "latitude": None,
+                "longitude": None,
                 "total_appearances": 1
             },
             "history": []

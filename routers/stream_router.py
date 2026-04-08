@@ -12,6 +12,7 @@ from typing import Dict, Any
 from config import config
 from core.pipeline import Pipeline
 from models.schemas import StreamStartRequest, StreamInfo
+from modules.geolocation import geolocation_engine
 
 router = APIRouter(tags=["Stream"])
 
@@ -179,12 +180,17 @@ def _stream_worker(camera_id: str, source: str):
         _, jpeg_buf = _cv2.imencode('.jpg', annotated,
                                     [_cv2.IMWRITE_JPEG_QUALITY, config.frame_jpeg_quality])
         b64 = base64.b64encode(jpeg_buf.tobytes()).decode('utf-8')
+        
+        current_loc = geolocation_engine.get_current_location()
         active_streams[camera_id]["latest_ws_payload"] = json.dumps({
             "frame": b64,
             "width": annotated.shape[1],
             "height": annotated.shape[0],
             "detections": detections,
-            "fps": int(1.0 / (time.monotonic() - t0 + 0.001))
+            "fps": int(1.0 / (time.monotonic() - t0 + 0.001)),
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "latitude": current_loc["latitude"],
+            "longitude": current_loc["longitude"]
         })
 
         # Frame-rate timing (strict native video speed control)

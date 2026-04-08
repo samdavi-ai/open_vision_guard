@@ -1,0 +1,362 @@
+Act as a senior real-time computer vision engineer and systems architect.
+
+Upgrade my existing AI image processing project (SmartSort AI / environmental monitoring system) to support real-time video input, timestamp extraction, and geolocation tracking, and integrate all outputs into a live dashboard UI.
+
+-------------------------------------------------
+OBJECTIVE
+-------------------------------------------------
+
+Enhance the system with:
+
+1. Real-time video stream processing
+2. Accurate timestamp extraction per frame/event
+3. Geo-location tagging (latitude, longitude)
+4. UI display of all metadata
+5. Logging for analytics and tracking
+
+-------------------------------------------------
+FEATURE REQUIREMENTS
+-------------------------------------------------
+
+1. LIVE VIDEO INGESTION
+
+- Support:
+  - Webcam (OpenCV VideoCapture)
+  - RTSP stream
+  - Video file simulation
+
+- Maintain:
+  - 20–30 FPS
+  - Frame buffering
+  - Low latency
+
+-------------------------------------------------
+2. TIMESTAMP EXTRACTION
+
+For every frame or detected object:
+
+- Extract system time using Python datetime
+- Format:
+
+  YYYY-MM-DD HH:MM:SS
+
+- Attach timestamp to:
+  - Each detection
+  - Each tracked object
+  - Each database entry
+
+Example:
+
+{
+  "object_id": 12,
+  "material": "plastic",
+  "timestamp": "2026-03-25 18:45:12"
+}
+
+-------------------------------------------------
+3. GEOLOCATION INTEGRATION
+
+Support 3 modes:
+
+A. STATIC LOCATION (default)
+- Hardcode lat/long for testing
+
+B. GPS MODULE (if hardware available)
+- Read from serial/GPS API
+
+C. IP-BASED LOCATION (fallback)
+- Use free API (optional, mock if offline)
+
+Data format:
+
+{
+  "latitude": 13.0827,
+  "longitude": 80.2707
+}
+
+Attach geolocation to every detection event.
+
+-------------------------------------------------
+4. UPDATED PIPELINE
+
+Design new pipeline:
+
+Video Feed
+   ↓
+Frame Capture
+   ↓
+Timestamp Injection
+   ↓
+Geo-location Tagging
+   ↓
+Preprocessing
+   ↓
+Detection (YOLO)
+   ↓
+Tracking
+   ↓
+Event Creation
+   ↓
+Database Logging
+   ↓
+Dashboard Update
+
+-------------------------------------------------
+5. DATABASE SCHEMA UPDATE
+
+Modify table:
+
+CREATE TABLE detections (
+    id INTEGER PRIMARY KEY,
+    object_id INTEGER,
+    material TEXT,
+    confidence FLOAT,
+    size TEXT,
+    timestamp TEXT,
+    latitude FLOAT,
+    longitude FLOAT
+);
+
+-------------------------------------------------
+6. DASHBOARD UI (STREAMLIT)
+
+Display:
+
+- 🎥 Live video feed
+- 📦 Bounding boxes
+- ⏱ Timestamp (live updating)
+- 📍 Latitude & Longitude
+- 📊 Detection logs
+
+UI sections:
+
+1. Live Feed Panel
+2. Metadata Panel:
+   - Time
+   - Location
+3. Detection Table
+4. Analytics Charts
+
+-------------------------------------------------
+7. EVENT LOGGING SYSTEM
+
+For each detection:
+
+Log:
+
+- Object ID
+- Class
+- Confidence
+- Timestamp
+- Location
+
+Store in:
+- SQLite
+
+-------------------------------------------------
+8. OPTIONAL ADVANCED FEATURES
+
+- Map visualization (Folium)
+- Plot detections on map
+- Movement tracking per object
+- Geo-based heatmaps
+
+-------------------------------------------------
+9. PERFORMANCE REQUIREMENTS
+
+- Maintain real-time FPS
+- Avoid blocking UI
+- Use threading or async processing
+
+-------------------------------------------------
+10. OUTPUT EXPECTED
+
+Provide:
+
+1. Modular code for:
+   - video_capture.py
+   - timestamp_utils.py
+   - geolocation.py
+   - updated inference pipeline
+2. Updated database code
+3. Streamlit UI code
+4. Testing instructions
+5. Optimization tips
+
+Ensure:
+- Clean architecture
+- Real-time capability
+- Production-ready code
+
+
+Act as a senior computer vision engineer and real-time analytics system architect.
+
+Upgrade my existing real-time AI vision system to support interactive object-level analytics, where clicking a detected person in the live UI reveals a full analytics panel with detailed, continuously updating information about that specific individual.
+
+-------------------------------------------------
+OBJECTIVE
+-------------------------------------------------
+
+Enable a system where:
+
+- Each detected person has a unique persistent ID
+- User can click on a person in the live video feed
+- A dedicated analytics panel opens
+- The panel shows real-time and historical data for that specific person
+- Data updates continuously as long as the person is tracked
+
+-------------------------------------------------
+CORE REQUIREMENTS
+-------------------------------------------------
+
+1. OBJECT TRACKING (MANDATORY)
+
+- Use DeepSORT or ByteTrack
+- Assign unique ID per person:
+
+Example:
+person_id = 7
+
+- Maintain tracking across frames
+- Handle:
+  - occlusion
+  - re-identification (basic)
+
+-------------------------------------------------
+2. CLICKABLE LIVE UI
+
+In Streamlit:
+
+- Display video frame with bounding boxes
+- Each box must include:
+  - person_id
+  - clickable region (simulate via selection list or coordinate click)
+
+User interaction options:
+A. Click on bounding box (advanced)
+B. Select person_id from sidebar (simpler + reliable)
+
+-------------------------------------------------
+3. PERSON ANALYTICS ENGINE
+
+For each tracked person maintain:
+
+STRUCTURE:
+
+{
+  "person_id": 7,
+  "first_seen": timestamp,
+  "last_seen": timestamp,
+  "total_duration": seconds,
+  "current_position": (x, y),
+  "trajectory": [ (x1,y1), (x2,y2), ... ],
+  "speed": value,
+  "direction": value,
+  "zone": "Area A",
+  "behavior": "walking / idle / suspicious",
+  "detections": count,
+  "confidence_avg": float,
+  "geo_location": (lat, long)
+}
+
+-------------------------------------------------
+4. REAL-TIME ANALYTICS LOGIC
+
+Compute continuously:
+
+A. Time-based:
+- Duration = last_seen - first_seen
+- Active time in frame
+
+B. Movement:
+- Speed = distance / time
+- Direction (angle of motion)
+- Path tracking
+
+C. Behavior:
+- Stationary → loitering
+- Fast movement → running
+- Repeated movement → suspicious
+
+D. Zone Analytics:
+- Define zones in frame
+- Detect entry/exit
+- Count time spent per zone
+
+-------------------------------------------------
+5. EVENT LOGGING
+
+Store per person:
+
+TABLE: person_logs
+
+- person_id
+- timestamp
+- position_x
+- position_y
+- speed
+- zone
+- event_type (entered, exited, idle, moving)
+
+-------------------------------------------------
+6. UI — PERSON ANALYTICS PANEL
+
+When user selects a person:
+
+Display:
+
+🧑 Person ID: 7  
+⏱ Seen for: 32 seconds  
+📍 Current Position  
+📌 Location (lat, long)  
+📈 Speed: 1.2 m/s  
+🧭 Direction: North-East  
+📊 Confidence Avg: 92%  
+
+Charts:
+
+- Movement trajectory plot
+- Speed over time graph
+- Zone heatmap
+
+-------------------------------------------------
+7. MULTI-PERSON HANDLING
+
+- Maintain dictionary:
+
+persons = {
+  id1: data,
+  id2: data
+}
+
+- Remove inactive IDs after timeout
+
+-------------------------------------------------
+8. PERFORMANCE REQUIREMENTS
+
+- Maintain real-time FPS
+- Efficient tracking (avoid heavy computation)
+- Use lightweight data structures
+
+-------------------------------------------------
+9. OPTIONAL ADVANCED FEATURES
+
+- Face recognition (if needed)
+- Re-identification across cameras
+- Alert on suspicious behavior
+- Person history playback
+- Heatmaps for crowd movement
+
+-------------------------------------------------
+10. OUTPUT REQUIRED
+
+Provide:
+
+1. Tracking module code
+2. Person analytics engine code
+3. UI interaction logic (selection/click)
+4. Data structure design
+5. Example Streamlit dashboard layout
+6. Optimization strategies
+
+Build this as a production-grade real-time analytics system, not a demo.

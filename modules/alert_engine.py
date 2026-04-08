@@ -91,9 +91,15 @@ class AlertEngine:
             "loitering": "medium",
             "zone_breach": "high",
             "unknown_person": "low",
-            "object_left_behind": "critical",  # Suspicious package / bomb scenario
-            "object_acquired": "high",          # Potential theft
-            "object_swapped": "critical",       # Object exchange (drug deal, bomb swap)
+            "object_left_behind": "critical",
+            "object_acquired": "high",
+            "object_swapped": "critical",
+            "luggage_abandoned": "critical",
+            "luggage_theft": "critical",
+            "sudden_movement": "high",
+            "camera_avoidance": "medium",
+            "high_risk": "critical",
+            "following": "high",
         }
         return severity_map.get(alert_type, "medium")
 
@@ -133,6 +139,30 @@ class AlertEngine:
         elif alert_type == "object_swapped":
             obj = details.get("object", "object") if isinstance(details, dict) else "object"
             return f"🚨 OBJECT SWAP: {base} — {obj} exchanged (suspicious activity)"
+
+        elif alert_type == "luggage_abandoned":
+            ltype = details.get("luggage_type", "luggage") if isinstance(details, dict) else "luggage"
+            return f"🚨 ABANDONED LUGGAGE: {base} — {ltype} left unattended"
+
+        elif alert_type == "luggage_theft":
+            ltype = details.get("luggage_type", "luggage") if isinstance(details, dict) else "luggage"
+            prev = details.get("previous_owner", "unknown") if isinstance(details, dict) else "unknown"
+            return f"🚨 LUGGAGE THEFT: {base} — {ltype} taken from {prev}"
+
+        elif alert_type == "sudden_movement":
+            mtype = details.get("type", "sudden movement") if isinstance(details, dict) else "sudden movement"
+            return f"⚠ SUDDEN MOVEMENT: {base} — {mtype} detected"
+
+        elif alert_type == "camera_avoidance":
+            return f"⚠ CAMERA AVOIDANCE: {base} — Subject actively avoiding camera"
+
+        elif alert_type == "high_risk":
+            score = details.get("risk_score", 0) if isinstance(details, dict) else 0
+            return f"🚨 HIGH RISK: {base} — Composite risk score {score}/100"
+
+        elif alert_type == "following":
+            target = details.get("target_id", "unknown") if isinstance(details, dict) else "unknown"
+            return f"⚠ FOLLOWING: {base} — Appears to be following {target}"
 
         return f"ALERT: {base} — {alert_type}"
 
