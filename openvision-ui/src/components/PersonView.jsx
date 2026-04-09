@@ -2,8 +2,11 @@ import React, { useEffect, useState, useRef } from 'react';
 import {
   ArrowLeft, Fingerprint, Activity, Package, Clock,
   AlertTriangle, Eye, RefreshCw, Wifi, Shield, Move,
-  LogIn, LogOut, Crosshair, Zap, ChevronRight, MapPin
+  LogIn, LogOut, Crosshair, Zap, ChevronRight, MapPin, BarChart3
 } from 'lucide-react';
+import {
+  LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, Legend, ResponsiveContainer
+} from 'recharts';
 
 const RISK_COLORS = { low: '#22c55e', medium: '#eab308', high: '#f97316', critical: '#ef4444' };
 const RISK_GLOW   = { low: 'rgba(34,197,94,.12)', medium: 'rgba(234,179,8,.12)', high: 'rgba(249,115,22,.12)', critical: 'rgba(239,68,68,.12)' };
@@ -17,6 +20,8 @@ export default function PersonView({ globalId, cameraId = 'CAM_01', apiBase, onB
   const [connected, setConnected]   = useState(false);
   const [loading, setLoading]       = useState(true);
   const [personAlerts, setPersonAlerts] = useState([]);
+  const [activeTab, setActiveTab]   = useState('profile');
+  const [movementLogs, setMovementLogs] = useState([]);
 
   const cropWsRef  = useRef(null);
   const profileRef = useRef(null);
@@ -60,6 +65,30 @@ export default function PersonView({ globalId, cameraId = 'CAM_01', apiBase, onB
     return () => clearInterval(id);
   }, [globalId, apiBase]);
 
+  /* ── Movement Logs polling (3s refresh) ── */
+  useEffect(() => {
+    const fetchMovement = async () => {
+      if (activeTab !== 'analytics') return;
+      try {
+        const r = await fetch(`${apiBase}/analytics/movement/${globalId}`);
+        if (r.ok) {
+          const d = await r.json();
+          // Map timestamps for charts
+          const mapped = (d.movement_logs || []).map(log => ({
+            ...log,
+            timeLabel: new Date(log.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+            posX: Math.round(log.position_x || 0),
+            posY: Math.round(log.position_y || 0)
+          }));
+          setMovementLogs(mapped);
+        }
+      } catch (_) {}
+    };
+    fetchMovement();
+    const id = setInterval(fetchMovement, 3000);
+    return () => clearInterval(id);
+  }, [globalId, apiBase, activeTab]);
+
   const m = profile?.metadata ?? {};
   const history = profile?.history ?? [];
   const risk = m.risk_level || 'low';
@@ -81,6 +110,22 @@ export default function PersonView({ globalId, cameraId = 'CAM_01', apiBase, onB
           <span style={S.idBadge}>{globalId}</span>
         </div>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          {/* Tab Switcher */}
+          <div style={{ display: 'flex', background: 'rgba(0,0,0,0.4)', borderRadius: 8, padding: 3, marginRight: 15, border: '1px solid rgba(255,255,255,0.05)' }}>
+            <button 
+              onClick={() => setActiveTab('profile')}
+              style={{ ...S.tabBtn, background: activeTab === 'profile' ? 'rgba(59,130,246,0.2)' : 'transparent', color: activeTab === 'profile' ? '#fff' : 'var(--text-dim)' }}
+            >
+              <Fingerprint size={12} /> Profile
+            </button>
+            <button 
+              onClick={() => setActiveTab('analytics')}
+              style={{ ...S.tabBtn, background: activeTab === 'analytics' ? 'rgba(59,130,246,0.2)' : 'transparent', color: activeTab === 'analytics' ? '#fff' : 'var(--text-dim)' }}
+            >
+              <BarChart3 size={12} /> Analytics
+            </button>
+          </div>
+
           <div style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: '0.72rem', color: connected ? '#22c55e' : '#ef4444' }}>
             <Wifi size={12} /> {connected ? 'Live Tracking' : 'Reconnecting...'}
           </div>
@@ -91,8 +136,8 @@ export default function PersonView({ globalId, cameraId = 'CAM_01', apiBase, onB
         </div>
       </header>
 
-      {/* 3-Column Grid */}
-      <div style={S.grid}>
+      {activeTab === 'profile' ? (
+        <div style={S.grid}>
 
         {/* ═══ LEFT COLUMN: Live Feed + Movement ═══ */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
@@ -264,6 +309,46 @@ export default function PersonView({ globalId, cameraId = 'CAM_01', apiBase, onB
           </Card>
         </div>
       </div>
+      ) : (
+        /* ═══ ANALYTICS TAB ═══ */
+        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', padding: 15, overflow: 'hidden' }}>
+          <Card icon={<BarChart3 size={14} />} title="MOVEMENT & KINETICS ANALYTICS (REAL-TIME)" style={{ flex: 1 }}>
+            <div style={{ flex: 1, padding: 20, minHeight: 0 }}>
+              {movementLogs.length > 0 ? (
+                <ResponsiveContainer width="100%" height="100%">
+                  <LineChart data={movementLogs} margin={{ top: 10, right: 30, left: 0, bottom: 0 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" />
+                    <XAxis dataKey="timeLabel" stroke="var(--text-dim)" fontSize={11} tickMargin={10} minTickGap={30} />
+                    
+                    {/* Primary Y-Axis (Location/Position X) */}
+                    <YAxis yAxisId="left" stroke="#3b82f6" fontSize={11} label={{ value: 'X Position (Geo Context)', angle: -90, position: 'insideLeft', fill: 'var(--text-dim)', fontSize: 11 }} />
+                    
+                    {/* Secondary Y-Axis (Speed) */}
+                    <YAxis yAxisId="right" orientation="right" stroke="#eab308" fontSize={11} label={{ value: 'Speed (px/s)', angle: 90, position: 'insideRight', fill: 'var(--text-dim)', fontSize: 11 }} />
+                    
+                    <RechartsTooltip 
+                      contentStyle={{ backgroundColor: 'rgba(8,15,30,0.95)', border: '1px solid var(--border-color)', borderRadius: 8, fontSize: '0.75rem' }}
+                      itemStyle={{ fontWeight: 600 }}
+                      labelStyle={{ color: 'var(--text-dim)', marginBottom: 5 }}
+                    />
+                    <Legend wrapperStyle={{ fontSize: '0.75rem', paddingTop: 10 }} />
+                    
+                    {/* Lines */}
+                    <Line yAxisId="left" type="monotone" dataKey="posX" name="Floor Geo Location X" stroke="#3b82f6" strokeWidth={2} dot={false} activeDot={{ r: 6 }} />
+                    <Line yAxisId="left" type="monotone" dataKey="posY" name="Floor Geo Location Y" stroke="#8b5cf6" strokeWidth={2} dot={false} />
+                    <Line yAxisId="right" type="monotone" dataKey="speed" name="Kinetic Speed" stroke="#eab308" strokeWidth={2} dot={false} />
+                  </LineChart>
+                </ResponsiveContainer>
+              ) : (
+                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100%', color: 'var(--text-dim)' }}>
+                  <RefreshCw size={24} style={{ animation: 'spin 2s linear infinite', marginBottom: 10, opacity: 0.5 }} />
+                  Gathering movement telemetry...
+                </div>
+              )}
+            </div>
+          </Card>
+        </div>
+      )}
     </div>
   );
 }
@@ -518,4 +603,9 @@ const S = {
     background: 'rgba(59,130,246,0.15)', color: '#60a5fa',
     padding: '0.2rem 0.5rem', borderRadius: 999, fontSize: '0.7rem', fontWeight: 500,
   },
+  tabBtn: {
+    padding: '4px 12px', display: 'flex', alignItems: 'center', gap: 6,
+    borderRadius: 6, border: 'none', cursor: 'pointer', fontSize: '0.7rem',
+    fontWeight: 600, transition: 'all 0.2s ease', fontFamily: 'inherit'
+  }
 };

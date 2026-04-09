@@ -328,3 +328,14 @@ def get_visit_history(person_id: str) -> List[Dict[str, Any]]:
             (person_id,)
         )
         return [dict(row) for row in cursor.fetchall()]
+
+def get_movement_logs(person_id: str, limit: int = 200) -> List[Dict[str, Any]]:
+    """Retrieves chronological movement trajectory metrics for charting."""
+    with get_connection() as conn:
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT timestamp, position_x, position_y, speed, zone, event_type FROM person_logs WHERE person_id = ? ORDER BY timestamp ASC LIMIT ?",
+            (person_id, limit)
+        )
+        return [dict(row) for row in cursor.fetchall()]

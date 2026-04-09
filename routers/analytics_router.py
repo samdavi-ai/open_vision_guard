@@ -42,3 +42,12 @@ async def get_presence_logs(
     """Get presence event logs (entry/exit events)."""
     logs = database.get_presence_logs(person_id=person_id, limit=limit)
     return {"presence_logs": logs, "count": len(logs)}
+
+
+@router.get("/movement/{person_id}")
+async def get_movement_analytics(person_id: str, limit: int = Query(200, ge=1, le=1000)):
+    """Get time-series movement trajectory metrics for dynamic UI charting."""
+    logs = database.get_movement_logs(person_id, limit=limit)
+    if not logs:
+        return {"person_id": person_id, "movement_logs": []}
+    return {"person_id": person_id, "movement_logs": logs}

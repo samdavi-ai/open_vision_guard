@@ -13,7 +13,7 @@ class GeoLocationManager:
     def __init__(self, mode="auto", default_lat=13.0827, default_lon=80.2707):
         self.mode = mode
         self.lat = default_lat
-        self.lon = default_lon
+        self.lon = default_lonx
         
         if self.mode == "auto":
             try:
