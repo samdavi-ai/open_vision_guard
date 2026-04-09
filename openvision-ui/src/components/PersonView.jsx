@@ -64,6 +64,27 @@ export default function PersonView({ globalId, cameraId = 'CAM_01', apiBase, onB
     const id = setInterval(fetchAlerts, 5000);
     return () => clearInterval(id);
   }, [globalId, apiBase]);
+  
+  const [faceLogs, setFaceLogs] = useState([]);
+  const [presenceLogs, setPresenceLogs] = useState([]);
+
+  /* ── Face & Presence Logs polling (5s refresh) ── */
+  useEffect(() => {
+    const fetchLogs = async () => {
+      if (activeTab !== 'logs') return;
+      try {
+        const [r1, r2] = await Promise.all([
+          fetch(`${apiBase}/face-logs/${globalId}`),
+          fetch(`${apiBase}/analytics/presence/${globalId}`)
+        ]);
+        if (r1.ok) setFaceLogs(await r1.json());
+        if (r2.ok) setPresenceLogs(await r2.json());
+      } catch (_) {}
+    };
+    fetchLogs();
+    const id = setInterval(fetchLogs, 5000);
+    return () => clearInterval(id);
+  }, [globalId, apiBase, activeTab]);
 
   /* ── Movement Logs polling (3s refresh) ── */
   useEffect(() => {
@@ -123,6 +144,12 @@ export default function PersonView({ globalId, cameraId = 'CAM_01', apiBase, onB
               style={{ ...S.tabBtn, background: activeTab === 'analytics' ? 'rgba(59,130,246,0.2)' : 'transparent', color: activeTab === 'analytics' ? '#fff' : 'var(--text-dim)' }}
             >
               <BarChart3 size={12} /> Analytics
+            </button>
+            <button 
+              onClick={() => setActiveTab('logs')}
+              style={{ ...S.tabBtn, background: activeTab === 'logs' ? 'rgba(59,130,246,0.2)' : 'transparent', color: activeTab === 'logs' ? '#fff' : 'var(--text-dim)' }}
+            >
+              <Shield size={12} /> Logs
             </button>
           </div>
 
@@ -309,7 +336,7 @@ export default function PersonView({ globalId, cameraId = 'CAM_01', apiBase, onB
           </Card>
         </div>
       </div>
-      ) : (
+      ) : activeTab === 'analytics' ? (
         /* ═══ ANALYTICS TAB ═══ */
         <div style={{ flex: 1, display: 'flex', flexDirection: 'column', padding: 15, overflow: 'hidden' }}>
           <Card icon={<BarChart3 size={14} />} title="MOVEMENT & KINETICS ANALYTICS (REAL-TIME)" style={{ flex: 1 }}>
@@ -346,6 +373,71 @@ export default function PersonView({ globalId, cameraId = 'CAM_01', apiBase, onB
                 </div>
               )}
             </div>
+          </Card>
+        </div>
+      ) : (
+        /* ═══ LOGS TAB ═══ */
+        <div style={{ flex: 1, display: 'grid', gridTemplateColumns: '3fr 2fr', gap: 10, padding: 10, overflow: 'hidden' }}>
+          
+          {/* Face Recognition Log */}
+          <Card icon={<Eye size={14} />} title="FACE RECOGNITION LOG" style={{ overflow: 'hidden' }}>
+            <div style={{ flex: 1, overflowY: 'auto', padding: 10 }}>
+              {faceLogs.length > 0 ? (
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(140px, 1fr))', gap: 10 }}>
+                  {faceLogs.map((log, i) => (
+                    <div key={i} style={{ background: 'rgba(0,0,0,0.3)', borderRadius: 8, overflow: 'hidden', border: '1px solid rgba(255,255,255,0.05)' }}>
+                       <div style={{ height: 100, background: '#000', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                         <img 
+                           src={`${API_BASE}/static/${log.crop_path}`} 
+                           alt="Face Crop" 
+                           style={{ height: '100%', width: '100%', objectFit: 'cover' }}
+                           onError={(e) => { e.target.src = 'https://via.placeholder.com/100?text=No+Image'; }}
+                         />
+                       </div>
+                       <div style={{ padding: 8 }}>
+                         <div style={{ fontSize: '0.7rem', fontWeight: 700, color: log.match_status === 'known' ? '#22c55e' : 'var(--text-dim)' }}>
+                           {log.face_name || 'Unknown'}
+                         </div>
+                         <div style={{ fontSize: '0.6rem', color: 'var(--text-dim)', marginTop: 2 }}>
+                           {new Date(log.timestamp).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' })}
+                         </div>
+                       </div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div style={{ textAlign: 'center', padding: 40, color: 'var(--text-dim)' }}>No face logs recorded</div>
+              )}
+            </div>
+          </Card>
+
+          {/* Presence Timeline Log */}
+          <Card icon={<Clock size={14} />} title="PRESENCE TIMELINE" style={{ overflow: 'hidden' }}>
+             <div style={{ flex: 1, overflowY: 'auto', padding: 10 }}>
+               {presenceLogs.length > 0 ? (
+                 <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                    {presenceLogs.map((log, i) => (
+                      <div key={i} style={{ padding: 8, borderRadius: 6, background: log.event_type === 'entry' ? 'rgba(34,197,94,0.05)' : 'rgba(239,68,68,0.05)', border: `1px solid ${log.event_type === 'entry' ? '#22c55e30' : '#ef444430'}` }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
+                          <span style={{ fontSize: '0.65rem', fontWeight: 800, textTransform: 'uppercase', color: log.event_type === 'entry' ? '#22c55e' : '#ef4444' }}>
+                            {log.event_type === 'entry' ? <LogIn size={10} style={{marginRight:4}} /> : <LogOut size={10} style={{marginRight:4}} />}
+                            {log.event_type}
+                          </span>
+                          <span style={{ fontSize: '0.6rem', color: 'var(--text-dim)' }}>{new Date(log.timestamp).toLocaleString()}</span>
+                        </div>
+                        {log.session_duration > 0 && (
+                          <div style={{ fontSize: '0.7rem', color: 'var(--text-main)' }}>
+                             Dwell Time: {formatDuration(log.session_duration * 1000)}
+                          </div>
+                        )}
+                        <div style={{ fontSize: '0.6rem', color: 'var(--text-dim)', marginTop: 2 }}>{log.camera_id}</div>
+                      </div>
+                    ))}
+                 </div>
+               ) : (
+                 <div style={{ textAlign: 'center', padding: 40, color: 'var(--text-dim)' }}>No presence history</div>
+               )}
+             </div>
           </Card>
         </div>
       )}

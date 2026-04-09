@@ -52,6 +52,11 @@ assets_path = os.path.join(frontend_path, "assets")
 if os.path.exists(assets_path):
     app.mount("/assets", StaticFiles(directory=assets_path), name="assets")
 
+# Mount data directory for face crops and alerts
+if not os.path.exists("data"):
+    os.makedirs("data")
+app.mount("/static/data", StaticFiles(directory="data"), name="static")
+
 @app.get("/")
 async def root():
     return {

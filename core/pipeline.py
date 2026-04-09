@@ -14,6 +14,13 @@ from modules.weapon_detector import WeaponDetector
 from modules.alert_engine import alert_engine
 from modules import database
 from modules.geolocation import geolocation_engine
+from modules.behaviour_analyzer import behaviour_analyzer
+from modules.risk_engine import risk_engine
+from modules.luggage_tracker import luggage_tracker
+from modules.presence_tracker import presence_tracker
+from modules.sudden_movement_detector import sudden_movement_detector
+from modules.camera_avoidance_detector import camera_avoidance_detector
+from modules.frequency_analyzer import frequency_analyzer
 import math
 import os
 import uuid
@@ -226,23 +233,6 @@ class Pipeline:
                     })
                 self._prev_centers[global_id] = {"cx": cx, "cy": cy, "t": current_time}
 
-                # --- Intelligence Modules ---
-                
-                # Frequency
-                frequency_analyzer.record_appearance(global_id, current_time)
-                
-                # Behaviour
-                behaviour_res = behaviour_analyzer.update(global_id, cx, cy, speed, current_time)
-                embedding_engine.update_identity_metadata(global_id, {
-                    "behaviour_label": behaviour_res["behaviour_label"],
-                    "behaviour_score": behaviour_res["behaviour_score"]
-                })
-                
-                # Sudden Movement
-                sudden_res = sudden_movement_detector.update(global_id, speed, current_time)
-                if sudden_res:
-                    alert = alert_engine.create_alert("sudden_movement", global_id, camera_id, sudden_res, frame)
-                    if alert: alerts_list.append(alert)
 
                 # Store scaled int coords (same space as current_detections_list)
                 person_boxes.append([x1, y1, x2, y2])
@@ -520,6 +510,9 @@ class Pipeline:
         result.identities = embedding_engine.get_all_identities()
         result.alerts = alerts_list
         result.current_detections = current_detections_list
+
+        # Final check for presence (exits)
+        presence_tracker.check_exits(person_ids, camera_id)
 
         return result
 

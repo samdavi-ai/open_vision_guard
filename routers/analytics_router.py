@@ -1,53 +1,40 @@
-"""
-Analytics Router
-API endpoints for frequency analysis, presence data, and system-wide analytics.
-"""
-from fastapi import APIRouter, Query
-from typing import Optional
+from fastapi import APIRouter, HTTPException
+from typing import List, Dict, Any, Optional
 from modules import database
-from modules.frequency_analyzer import frequency_analyzer
-from modules.presence_tracker import presence_tracker
 
 router = APIRouter(prefix="/analytics", tags=["Analytics"])
 
-
 @router.get("/frequency/{person_id}")
-async def get_frequency_data(person_id: str):
-    """Get visit frequency data for a specific person."""
-    data = frequency_analyzer.get_frequency_data(person_id)
-    return data
-
-
-@router.get("/overview")
-async def get_analytics_overview():
-    """Get system-wide frequency and statistics overview."""
-    overview = frequency_analyzer.get_overview()
-    return overview
-
+async def get_frequency_analytics(person_id: str):
+    """
+    Retrieves visit frequency data and history for a person.
+    """
+    try:
+        history = database.get_visit_history(person_id)
+        return {
+            "person_id": person_id,
+            "visit_count": len(history),
+            "history": history
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/presence/{person_id}")
-async def get_presence_data(person_id: str):
-    """Get presence/dwell data for a specific person."""
-    data = presence_tracker.get_presence_data(person_id)
-    if not data:
-        return {"person_id": person_id, "message": "No presence data available"}
-    return data
-
-
-@router.get("/presence-logs")
-async def get_presence_logs(
-    person_id: Optional[str] = Query(None),
-    limit: int = Query(100, ge=1, le=1000)
-):
-    """Get presence event logs (entry/exit events)."""
-    logs = database.get_presence_logs(person_id=person_id, limit=limit)
-    return {"presence_logs": logs, "count": len(logs)}
-
+async def get_presence_logs(person_id: str, limit: int = 100):
+    """
+    Retrieves all presence logs (entry/exit) for a person.
+    """
+    try:
+        return database.get_presence_logs(person_id, limit=limit)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/movement/{person_id}")
-async def get_movement_analytics(person_id: str, limit: int = Query(200, ge=1, le=1000)):
-    """Get time-series movement trajectory metrics for dynamic UI charting."""
-    logs = database.get_movement_logs(person_id, limit=limit)
-    if not logs:
-        return {"person_id": person_id, "movement_logs": []}
-    return {"person_id": person_id, "movement_logs": logs}
+async def get_movement_logs(person_id: str, limit: int = 200):
+    """
+    Retrieves movement logs for trajectory analysis.
+    """
+    try:
+        return {"movement_logs": database.get_movement_logs(person_id, limit=limit)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
