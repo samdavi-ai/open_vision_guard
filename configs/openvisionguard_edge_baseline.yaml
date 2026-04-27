@@ -1,0 +1,11 @@
+model_path: yolov8n.pt
+device: cpu
+imgsz: 320
+conf: 0.28
+iou: 0.45
+process_every: 8
+min_motion_ratio: 0.004
+loitering_seconds: 30.0
+abandoned_seconds: 25.0
+alert_threshold: 65.0
+class_agnostic_source: true

@@ -20,6 +20,7 @@ router = APIRouter(tags=["Stream"])
 
 active_streams: Dict[str, Dict[str, Any]] = {}
 _pipeline: Pipeline = None
+_pipeline_lock = threading.Lock()
 
 # camera_id → {frame, timestamp}
 _latest_raw_frames: Dict[str, Any] = {}
@@ -51,7 +52,9 @@ CATEGORY_COLORS_BGR = {
 def get_pipeline() -> Pipeline:
     global _pipeline
     if _pipeline is None:
-        _pipeline = Pipeline()
+        with _pipeline_lock:
+            if _pipeline is None:
+                _pipeline = Pipeline()
     return _pipeline
 
 
@@ -124,10 +127,24 @@ def _update_crops(frame: 'np.ndarray', detections: list, camera_id: str):
 
 def _stream_worker(camera_id: str, source: str):
     """
-    Single-thread worker: read → AI → draw → send.
-    Uses YOLOv8n at 320px inference for fast, always-synced bounding boxes.
+    Single-thread worker: read -> AI -> draw -> send.
+
+    Production hardening integrated:
+      - DetectionMemory: interpolates bbox positions between AI frames
+      - AdaptiveInferenceController: dynamic AI FPS
+      - LatencyGuard: auto-disable expensive features when slow
+      - SceneProfiler: per-camera environment adaptation
+      - AdaptiveThresholdCalibrator: per-camera confidence tuning
+      - EdgeCaseDetector: handles lighting changes, shake, noise
     """
     import cv2 as _cv2
+    from modules.detection_memory import DetectionMemory
+    from modules.adaptive_inference import adaptive_controller
+    from modules.production_guard import (
+        latency_guard, scene_profiler, threshold_calibrator,
+        edge_detector,
+    )
+
     pipeline = get_pipeline()
 
     is_webcam = str(source) == "0"
@@ -145,6 +162,9 @@ def _stream_worker(camera_id: str, source: str):
     last_ai_time = 0.0
     detections = []
 
+    # Per-camera detection memory
+    memory = DetectionMemory(ttl_frames=9, interpolate=True)
+
     while active_streams.get(camera_id, {}).get("status") == "running":
         t0 = time.monotonic()
         ret, frame = cap.read()
@@ -157,33 +177,65 @@ def _stream_worker(camera_id: str, source: str):
         # Store raw frame
         _latest_raw_frames[camera_id] = {"frame": frame.copy(), "timestamp": time.time()}
 
-        # Run AI only every ~100-150ms (Asynchronous Sync)
-        # This allows the video to play at native speed while AI tracks accurately.
+        # Determine AI interval (adaptive or fixed)
+        ai_interval = adaptive_controller.get_interval()
+
         now = time.monotonic()
-        if now - last_ai_time > 0.12:  # Target ~8 AI FPS inside a 30 FPS video loop
+        if now - last_ai_time > ai_interval:
+            # -- AI FRAME: run full pipeline ------------------------------------
             try:
                 result = pipeline.process_frame(frame, camera_id)
                 detections = result.current_detections
                 active_streams[camera_id]["latest_alerts"] = result.alerts
                 last_ai_time = now
+
+                # Feed detection memory
+                memory.update(detections)
+
+                # Feed adaptive controller
+                adaptive_controller.feed(detections, frame)
+
+                # ── Production Hardening Feeds ────────────────────────────────
+                # Adaptive threshold calibration (per-camera confidence tuning)
+                threshold_calibrator.feed(camera_id, detections)
+
+                # Scene profiling (lighting, density, motion)
+                scene_profiler.update(camera_id, frame, detections)
+
+                # Edge case detection (lighting changes, shake, noise)
+                edge_events = edge_detector.check(camera_id, frame, len(detections))
+                if edge_events.get("lighting_change"):
+                    print(f"[EdgeCase] {camera_id}: Sudden lighting change detected")
+                if edge_events.get("camera_shake"):
+                    print(f"[EdgeCase] {camera_id}: Camera shake detected")
+
             except Exception as e:
                 print(f"[Pipeline error] {e}")
                 detections = active_streams[camera_id].get("latest_detections", [])
+        else:
+            # -- NON-AI FRAME: use interpolated positions from memory -----------
+            memory.tick()
+            detections = memory.get_active()
 
         active_streams[camera_id]["latest_detections"] = detections
 
         # Update person crops for WebSocket crop streams
         _update_crops(frame, detections, camera_id)
 
-        # Draw detections onto annotated frame (always synced to the pixel space)
+        # Draw detections onto annotated frame
         annotated = _draw_detections(frame, detections)
+
+        # Measure frame latency and feed latency guard
+        frame_latency_ms = (time.monotonic() - t0) * 1000
+        latency_guard.record(frame_latency_ms)
 
         # Encode and store
         _, jpeg_buf = _cv2.imencode('.jpg', annotated,
                                     [_cv2.IMWRITE_JPEG_QUALITY, config.frame_jpeg_quality])
         b64 = base64.b64encode(jpeg_buf.tobytes()).decode('utf-8')
-        
+
         current_loc = geolocation_engine.get_current_location()
+        scene = scene_profiler.get_profile(camera_id)
         active_streams[camera_id]["latest_ws_payload"] = json.dumps({
             "frame": b64,
             "width": annotated.shape[1],
@@ -192,10 +244,16 @@ def _stream_worker(camera_id: str, source: str):
             "fps": int(1.0 / (time.monotonic() - t0 + 0.001)),
             "timestamp": datetime.datetime.now().astimezone().isoformat(),
             "latitude": current_loc["latitude"],
-            "longitude": current_loc["longitude"]
+            "longitude": current_loc["longitude"],
+            # Production telemetry
+            "latency_ms": round(frame_latency_ms, 1),
+            "latency_status": latency_guard.status,
+            "scene_brightness": round(scene.avg_brightness, 1),
+            "scene_density": round(scene.avg_density, 1),
+            "adaptive_conf": round(threshold_calibrator.get_threshold(camera_id), 3),
         })
 
-        # Frame-rate timing (strict native video speed control)
+        # Frame-rate timing
         elapsed = time.monotonic() - t0
         remaining = frame_delay - elapsed
         if remaining > 0:
@@ -205,7 +263,7 @@ def _stream_worker(camera_id: str, source: str):
     active_streams[camera_id]["status"] = "stopped"
 
 
-# ── REST Endpoints ──────────────────────────────────────────
+# -- REST Endpoints ----------------------------------------------------------
 
 @router.post("/stream/upload")
 async def upload_video(file: UploadFile = File(...)):
@@ -263,7 +321,7 @@ async def get_person_crop(camera_id: str, global_id: str):
     return Response(content=b"", media_type="image/jpeg", status_code=404)
 
 
-# ── WebSocket Endpoints ─────────────────────────────────────
+# -- WebSocket Endpoints -----------------------------------------------------
 
 @router.websocket("/ws/stream/{camera_id}")
 async def ws_stream(websocket: WebSocket, camera_id: str):

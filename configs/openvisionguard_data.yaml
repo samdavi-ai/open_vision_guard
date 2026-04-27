@@ -1,0 +1,18 @@
+# YOLO dataset config for OpenVisionGuard edge detection.
+# Expected layout:
+# data/openvisionguard/
+#   images/train, images/val, images/test
+#   labels/train, labels/val, labels/test
+#
+# Class IDs are intentionally compact for transfer learning:
+# 0 person, 1 backpack, 2 handbag, 3 suitcase.
+path: data/openvisionguard
+train: images/train
+val: images/val
+test: images/test
+
+names:
+  0: person
+  1: backpack
+  2: handbag
+  3: suitcase

@@ -1,0 +1,84 @@
+You are a senior AI systems engineer responsible for productionizing an advanced surveillance system (OpenVisionGuard).
+
+The system already includes:
+
+* YOLOv8m detection
+* Smart multi-scale inference
+* ROI re-detection
+* Temporal stability and tracking
+* Track quality scoring
+* Occlusion handling
+* Evaluation pipeline (Precision, Recall, mAP)
+
+---
+
+## 🎯 OBJECTIVE
+
+Harden the system for real-world deployment across multiple cameras and environments.
+
+---
+
+## 🧠 REQUIRED IMPROVEMENTS
+
+### 1. Adaptive Threshold Calibration
+
+* Automatically adjust confidence thresholds per camera
+* Use rolling statistics from recent detections
+
+---
+
+### 2. Latency Guard System
+
+* Monitor processing latency
+* Dynamically disable expensive features when latency exceeds threshold
+
+---
+
+### 3. Scene Profiling
+
+* Build per-camera profiles (lighting, density, motion patterns)
+* Adjust detection parameters dynamically
+
+---
+
+### 4. False Positive Memory
+
+* Track recurring false detections
+* Suppress repeated patterns
+
+---
+
+### 5. Edge Case Handling
+
+* Detect sudden lighting changes
+* Handle camera shake and noise
+* Adjust detection behavior dynamically
+
+---
+
+### 6. Evaluation Rigor
+
+* Enforce proper dataset split
+* Compute mAP@50 and mAP@50:95
+* Validate across multiple scenarios
+
+---
+
+## 🔄 OUTPUT REQUIRED
+
+* Updated system architecture (with adaptive layer)
+* Code-level integration strategy
+* Pseudocode for adaptive systems
+* Performance impact analysis
+
+---
+
+## ⚠️ RULES
+
+* Must not reduce accuracy
+* Must maintain real-time performance
+* Must generalize across environments
+
+---
+
+Now harden the system for production deployment.  

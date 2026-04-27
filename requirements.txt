@@ -19,3 +19,7 @@ scipy>=1.11.0                 # Cosine similarity
 imageio>=2.31.0               # Video writing
 imageio-ffmpeg>=0.4.8         # FFMPEG backend for imageio
 pydantic>=2.0.0               # Request/response models
+PyYAML>=6.0.0                 # Config loading for training and edge runtime
+onnx>=1.15.0                  # ONNX export/validation
+onnxruntime>=1.17.0           # CPU inference and quantization tooling
+albumentations>=1.4.0         # Training-only blur/noise/weather augmentation support
