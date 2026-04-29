@@ -153,6 +153,22 @@ class TemporalBuffer:
                 prev_bbox = entry.smooth_bbox
                 new_bbox = det["bbox"]
                 if prev_bbox is not None:
+                    prev_cx = (prev_bbox[0] + prev_bbox[2]) / 2.0
+                    prev_cy = (prev_bbox[1] + prev_bbox[3]) / 2.0
+                    new_cx = (float(new_bbox[0]) + float(new_bbox[2])) / 2.0
+                    new_cy = (float(new_bbox[1]) + float(new_bbox[3])) / 2.0
+                    prev_w = max(1.0, prev_bbox[2] - prev_bbox[0])
+                    prev_h = max(1.0, prev_bbox[3] - prev_bbox[1])
+                    prev_diag = math.hypot(prev_w, prev_h)
+                    jump_px = math.hypot(new_cx - prev_cx, new_cy - prev_cy)
+
+                    if jump_px > (config.bbox_snap_distance_ratio * prev_diag):
+                        # Re-anchor instantly on large jumps to avoid sticky boxes.
+                        entry.smooth_bbox = [float(v) for v in new_bbox]
+                        entry.velocity = (0.0, 0.0, 0.0, 0.0)
+                        entry.prev_velocity = (0.0, 0.0, 0.0, 0.0)
+                        continue
+
                     new_vel = (
                         float(new_bbox[0]) - prev_bbox[0],
                         float(new_bbox[1]) - prev_bbox[1],
@@ -226,7 +242,11 @@ class TemporalBuffer:
             if entry.confirmed and entry.last_raw is not None and entry.smooth_bbox is not None:
                 patched = dict(entry.last_raw)
                 # Replace bbox with smoothed version (int-snapped)
-                patched["bbox"] = [max(0, int(v)) for v in entry.smooth_bbox]
+                sx1, sy1, sx2, sy2 = [max(0, int(v)) for v in entry.smooth_bbox]
+                if sx2 <= sx1 or sy2 <= sy1:
+                    patched["bbox"] = list(entry.last_raw.get("bbox", [sx1, sy1, sx2, sy2]))
+                else:
+                    patched["bbox"] = [sx1, sy1, sx2, sy2]
                 output.append(patched)
         return output
 
@@ -501,11 +521,21 @@ class Pipeline:
         now_iso = datetime.datetime.now().astimezone().isoformat()
         location = geolocation_engine.get_current_location()
 
-        # Import production guard singletons for latency gating
-        from modules.production_guard import latency_guard
+        # Import production guard singletons for dynamic, scene-aware inference
+        from modules.production_guard import latency_guard, scene_profiler, threshold_calibrator
 
         # ── CLAHE preprocessing for low-light improvement ────────────────────
         inference_frame = frame_preprocessor.enhance(frame)
+
+        # Dynamic tracker confidence:
+        # Start from calibrated camera threshold, then adjust to scene difficulty.
+        scene = scene_profiler.get_profile(camera_id)
+        dynamic_tracker_conf = threshold_calibrator.get_threshold(camera_id) - 0.05
+        if scene.is_low_light:
+            dynamic_tracker_conf -= 0.02
+        if scene.is_crowded:
+            dynamic_tracker_conf += 0.02
+        dynamic_tracker_conf = max(0.08, min(0.45, dynamic_tracker_conf))
 
         # Primary pass at config resolution (640px) with ByteTrack
         yolo = self.yolo_model.track(
@@ -513,7 +543,7 @@ class Pipeline:
             persist=True,
             verbose=False,
             imgsz=config.yolo_imgsz,
-            conf=0.10,
+            conf=dynamic_tracker_conf,
             iou=0.55,
             device=self.device,
             tracker="bytetrack.yaml",
@@ -609,6 +639,8 @@ class Pipeline:
         if result.boxes is None:
             return [], []
 
+        from modules.production_guard import fp_memory, scene_profiler, threshold_calibrator
+
         boxes = result.boxes.xyxy.cpu().numpy()
         cls_ids = result.boxes.cls.int().cpu().numpy()
         confs = result.boxes.conf.cpu().numpy()
@@ -621,6 +653,8 @@ class Pipeline:
         people: List[Dict[str, Any]] = []
         objects: List[Dict[str, Any]] = []
         h, w = frame_shape
+        scene = scene_profiler.get_profile(camera_id)
+        dynamic_person_base = threshold_calibrator.get_threshold(camera_id)
 
         for box, cls_id, conf, track_id in zip(boxes, cls_ids, confs, track_ids):
             cls_id = int(cls_id)
@@ -630,8 +664,22 @@ class Pipeline:
                 continue
 
             if cls_id == 0:  # person
-                # ── Fix 3: Use config-driven threshold (was hard-coded 0.16) ─
-                if conf < config.person_conf_threshold:
+                # Dynamic person threshold:
+                # 1) per-camera adaptive calibrator baseline
+                # 2) scene-aware adjustment (low-light / crowded conditions)
+                # 3) false-positive hotspot confidence boost by spatial cell
+                person_threshold = dynamic_person_base
+                if scene.is_low_light:
+                    person_threshold -= 0.03
+                if scene.is_crowded:
+                    person_threshold += 0.02
+                person_threshold += fp_memory.get_confidence_boost(camera_id, (x1, y1, x2, y2))
+                person_threshold = max(
+                    config.adaptive_calib_min_conf,
+                    min(config.adaptive_calib_max_conf, person_threshold),
+                )
+
+                if conf < person_threshold:
                     continue
                 if not self._valid_person_box((x1, y1, x2, y2), frame_shape):
                     continue
@@ -655,6 +703,10 @@ class Pipeline:
                 threshold = config.luggage_conf_threshold
             else:
                 threshold = config.object_conf_threshold
+
+            # Scene-aware object thresholding for better recall in dark scenes.
+            if scene.is_low_light:
+                threshold = max(0.10, threshold - 0.03)
 
             if cls_id in self.COCO_NAMES and conf >= threshold:
                 if not self._valid_object_box((x1, y1, x2, y2), frame_shape):

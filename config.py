@@ -6,13 +6,14 @@ class OpenVisionConfig:
     # yolov8n.pt = fastest / lowest accuracy
     # yolov8s.pt = good balance for edge devices with 4+ GB RAM
     # yolov8m.pt = high accuracy, requires GPU or fast CPU  ← UPGRADED
-    yolo_model_path: str = "yolov8m.pt"   # Upgraded from yolov8s for ≥95% recall
+    yolo_model_path: str = "yolov8m.pt"   # Maximum accuracy preset (higher compute)
     yolo_device: str = "cpu"               # "cpu" | "cuda" | "mps"
-    yolo_imgsz: int = 640                  # Inference resolution: 320, 640 or 960
+    yolo_imgsz: int = 640                  # Higher resolution improves detection accuracy
 
     # ── Confidence Hierarchy (primary / secondary / re-detection) ───────────
     # Primary: used for the main 640px ByteTrack pass
     person_conf_threshold: float = 0.25
+    primary_tracker_conf_threshold: float = 0.15
     object_conf_threshold: float = 0.25
     luggage_conf_threshold: float = 0.20
     vehicle_conf_threshold: float = 0.30
@@ -37,6 +38,7 @@ class OpenVisionConfig:
     temporal_hold_frames: int = 10         # Raised 6→10: more frames to survive occlusion
     # Smooth bbox positions over a rolling window to remove jitter
     bbox_smoothing_alpha: float = 0.45     # EMA weight for new bbox (0=freeze, 1=raw)
+    bbox_snap_distance_ratio: float = 0.85  # Snap bbox when center jumps too far
 
     # ── Frame Preprocessing ───────────────────────────────────────────────────
     # CLAHE contrast enhancement — dramatically improves low-light detections
@@ -54,7 +56,7 @@ class OpenVisionConfig:
 
     # ── Smart Multi-Scale Detection ─────────────────────────────────────────
     # 960px pass is now CONDITIONAL — only triggered when needed
-    multiscale_enabled: bool = True          # master switch
+    multiscale_enabled: bool = True          # Enable secondary high-res pass when triggered
     multiscale_imgsz: int = 960
     multiscale_nms_iou: float = 0.50
     # Trigger conditions (any one triggers the 960px pass):
@@ -144,16 +146,16 @@ class OpenVisionConfig:
     # ── Embedding / Face Recognition ──────────────────────────────────────────
     similarity_threshold: float = 0.82
     embedding_model: str = "mobilenet_v2"
-    face_recognition_enabled: bool = True
+    face_recognition_enabled: bool = False
     face_tolerance: float = 0.5
     min_face_height_px: int = 80
 
     # ── Pose ──────────────────────────────────────────────────────────────────
-    pose_enabled: bool = True
+    pose_enabled: bool = False
     fall_confidence_threshold: float = 0.6
 
     # ── Weapon Detection ──────────────────────────────────────────────────────
-    weapon_detection_enabled: bool = True
+    weapon_detection_enabled: bool = False
     weapon_confidence_threshold: float = 0.5
 
     # ── Motion / Loitering ────────────────────────────────────────────────────

@@ -76,9 +76,4 @@ Harden the system for real-world deployment across multiple cameras and environm
 ## ⚠️ RULES
 
 * Must not reduce accuracy
-* Must maintain real-time performance
-* Must generalize across environments
-
----
-
-Now harden the system for production deployment.  
+* Must maintain real-time performance* Must generalize across environments---Now harden the system for production deployment.
