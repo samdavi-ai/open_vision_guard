@@ -5,8 +5,12 @@ import AlertsFeed from './components/AlertsFeed';
 import PersonView from './components/PersonView';
 import './index.css';
 
-const API_BASE = `${window.location.protocol}//${window.location.hostname}:8080`;
-const WS_BASE  = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.hostname}:8080`;
+const backendHost =
+  (window.location.hostname === 'localhost' || window.location.hostname === '::1')
+    ? '127.0.0.1'
+    : window.location.hostname;
+const API_BASE = `${window.location.protocol}//${backendHost}:8080`;
+const WS_BASE  = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${backendHost}:8080`;
 
 /* ── Live Clock Hook ── */
 function useLiveClock() {

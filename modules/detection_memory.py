@@ -1,35 +1,10 @@
 """
 detection_memory.py — Detection Memory Layer for OpenVisionGuard.
 
-PURPOSE
--------
-The asynchronous pipeline runs YOLO at ~8-10 FPS inside a 25-30 FPS video
-loop. Between inference runs, there are 2-4 raw frames where YOLO produces
-no output at all. Without a memory layer, bounding boxes vanish from the
-screen every time the AI is "resting", causing the characteristic flicker
-observed in the original system.
-
-HOW IT WORKS
-------------
-1.  Every time the pipeline produces a confirmed detection, the DetectionMemory
-    stores it with a timestamp.
-
-2.  Between AI inference calls, the stream worker asks the memory for
-    "current" detections. The memory returns the last known detections for
-    every track that is still within its TTL (Time-To-Live) window.
-
-3.  Optionally, the memory **interpolates** box positions using a simple
-    linear velocity model.  If a person was moving right at 5 px/frame, the
-    returned box is shifted right by 5 px for every elapsed frame, keeping the
-    box "glued" to the person until the next real detection updates it.
-
-BENEFITS
---------
-*   Zero disappearances during brief occlusions or between AI frames.
-*   Smooth visual transitions between detection pulses.
-*   Eliminates the root cause of ID fragmentation in the TemporalBuffer.
+Stores last-known detections between AI inference pulses so bounding boxes
+never disappear from the display loop. Uses real-timestamp velocity instead
+of a hardcoded frame-count assumption.
 """
-
 from __future__ import annotations
 
 import time
@@ -43,28 +18,32 @@ class DetectionMemory:
     Parameters
     ----------
     ttl_frames : int
-        How many *video* frames a detection survives without a fresh AI update.
-        At 25 FPS and an AI cadence of 8 FPS, each AI frame covers ~3 video
-        frames.  A TTL of 9 means a detection is kept alive for ~3 AI cycles
-        (≈1.1 seconds), which gracefully handles short occlusions.
+        Video frames a detection survives without a fresh AI update.
     interpolate : bool
-        If True, box positions are shifted by the estimated velocity each frame.
+        Shift box positions by estimated velocity each tick.
+    video_fps : float
+        Expected display FPS — used to convert TTL frames to seconds.
     """
 
-    def __init__(self, ttl_frames: int = 9, interpolate: bool = True) -> None:
+    def __init__(
+        self,
+        ttl_frames: int = 9,
+        interpolate: bool = True,
+        video_fps: float = 25.0,
+    ) -> None:
         self._ttl = ttl_frames
         self._interpolate = interpolate
-        # global_id → {det, frames_remaining, velocity}
+        self._ttl_seconds = ttl_frames / max(1.0, video_fps)
+        # global_id → {det, expire_at, velocity, last_ts}
         self._store: Dict[str, Dict[str, Any]] = {}
 
-    # ─────────────────────────────────────────────────────── public API ──────
+    # ─────────────────────────────────────────────────── public API ──────
 
     def update(self, detections: List[Dict[str, Any]]) -> None:
-        """
-        Ingest a fresh batch of confirmed detections from the pipeline.
-        Called once per AI inference cycle.
-        """
+        """Ingest a fresh batch of confirmed detections from the pipeline."""
+        now = time.monotonic()
         seen_ids = set()
+
         for det in detections:
             gid = det.get("global_id")
             if not gid:
@@ -72,30 +51,32 @@ class DetectionMemory:
             seen_ids.add(gid)
 
             prev = self._store.get(gid)
-            velocity = self._compute_velocity(prev, det) if prev else (0.0, 0.0, 0.0, 0.0)
+            velocity = (
+                self._compute_velocity(prev, det, now) if prev else (0.0, 0.0, 0.0, 0.0)
+            )
 
             self._store[gid] = {
                 "det": det,
-                "frames_remaining": self._ttl,
+                "expire_at": now + self._ttl_seconds,
                 "velocity": velocity,
-                "timestamp": time.monotonic(),
+                "last_ts": now,
             }
 
-        # Decay counters for tracks NO longer returned by YOLO
+        # Prune stale entries for tracks no longer seen by YOLO
         for gid in list(self._store.keys()):
             if gid not in seen_ids:
-                self._store[gid]["frames_remaining"] -= 1
-                if self._store[gid]["frames_remaining"] <= 0:
+                if now >= self._store[gid]["expire_at"]:
                     del self._store[gid]
 
     def get_active(self) -> List[Dict[str, Any]]:
-        """
-        Return all live detections, applying position interpolation.
-        Called every video frame (25-30 FPS).
-        """
+        """Return all live detections, applying position interpolation."""
+        now = time.monotonic()
         results = []
-        for gid, entry in self._store.items():
-            det = dict(entry["det"])           # shallow copy — don't mutate store
+        for gid, entry in list(self._store.items()):
+            if now >= entry["expire_at"]:
+                del self._store[gid]
+                continue
+            det = dict(entry["det"])  # shallow copy — never mutate store
             if self._interpolate and entry["velocity"] != (0.0, 0.0, 0.0, 0.0):
                 det = self._shift_bbox(det, entry["velocity"])
             results.append(det)
@@ -103,38 +84,43 @@ class DetectionMemory:
 
     def tick(self) -> None:
         """
-        Advance the memory by one *video* frame (call once per cv2 frame read).
-        Non-updated entries gradually consume their TTL.  This prevents stale
-        boxes from lingering after a person has genuinely left the scene.
+        Called every video frame between AI pulses. Removes expired entries.
+        With time-based TTL this is lightweight — just one comparison per track.
         """
+        now = time.monotonic()
         for gid in list(self._store.keys()):
-            entry = self._store[gid]
-            # Only decay entries that are NOT freshly updated (frames_remaining < ttl)
-            if entry["frames_remaining"] < self._ttl:
-                entry["frames_remaining"] -= 1
-                if entry["frames_remaining"] <= 0:
-                    del self._store[gid]
+            if now >= self._store[gid]["expire_at"]:
+                del self._store[gid]
 
     def clear(self, gid: str) -> None:
         """Explicitly remove a specific identity (e.g. on confirmed exit)."""
         self._store.pop(gid, None)
 
-    # ─────────────────────────────────────────────────────── helpers ─────────
+    # ─────────────────────────────────────────────────── helpers ─────────
 
     @staticmethod
     def _compute_velocity(
-        prev: Dict[str, Any], current: Dict[str, Any]
+        prev: Dict[str, Any],
+        current: Dict[str, Any],
+        now: float,
     ) -> Tuple[float, float, float, float]:
         """
-        Estimate per-frame velocity (dx1, dy1, dx2, dy2) from two detections.
-        Used to extrapolate the box position between inference calls.
+        Estimate per-frame velocity using real elapsed time.
+
+        Previously this used a hardcoded `frames_elapsed = max(1, 3)` which
+        broke prediction whenever adaptive inference changed the AI cadence.
+        Now we measure actual seconds elapsed and divide by the display FPS
+        assumption (25 FPS) to get per-video-frame pixel shift.
         """
         pb = prev["det"].get("bbox", [0, 0, 0, 0])
         cb = current.get("bbox", [0, 0, 0, 0])
         if len(pb) < 4 or len(cb) < 4:
             return (0.0, 0.0, 0.0, 0.0)
-        # Assuming ~3 frames between AI pulses (8 FPS AI inside 25 FPS video)
-        frames_elapsed = max(1, 3)
+
+        elapsed_s = max(0.033, now - prev.get("last_ts", now - 0.1))
+        # Convert pixel delta over elapsed seconds → pixels per video frame
+        frames_elapsed = max(1.0, elapsed_s * 25.0)  # 25 = display FPS assumption
+
         return (
             (cb[0] - pb[0]) / frames_elapsed,
             (cb[1] - pb[1]) / frames_elapsed,
@@ -144,7 +130,7 @@ class DetectionMemory:
 
     @staticmethod
     def _shift_bbox(det: Dict[str, Any], vel: Tuple[float, float, float, float]) -> Dict[str, Any]:
-        """Apply one frame of velocity to the bounding box (clamped to ≥0)."""
+        """Apply one frame of velocity to the bounding box."""
         x1, y1, x2, y2 = det["bbox"]
         det["bbox"] = [
             max(0, int(x1 + vel[0])),
@@ -155,5 +141,5 @@ class DetectionMemory:
         return det
 
 
-# Module-level singleton — one memory per pipeline instance
+# Module-level singleton
 detection_memory = DetectionMemory(ttl_frames=9, interpolate=True)

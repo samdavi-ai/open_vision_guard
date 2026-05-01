@@ -1,155 +1,143 @@
 """
 adaptive_inference.py — Dynamic AI Inference Rate Controller for OpenVisionGuard.
 
-PURPOSE
--------
-In a surveillance system, the scene is often static for long periods (empty
-hallway, quiet parking lot) punctuated by bursts of activity (people entering,
-running, congregating).  Running YOLO at a fixed 8-10 FPS wastes GPU/CPU cycles
-during quiet moments and may miss fast action during busy moments.
+Key improvements over original:
+  - Zero-motion gate: skips AI on truly static scenes after initial warmup.
+  - Reuses preprocessor thumbnail to avoid duplicate resize/grayscale work.
+  - should_run_inference() consolidates the interval + motion gate into one call.
 
-The AdaptiveInferenceController solves this by mapping a real-time **activity
-score** to an inference interval:
-
-    Low activity  (0.0 - 0.3) -> 5 FPS  (200 ms interval)  -- saves power
-    Normal        (0.3 - 0.7) -> 10 FPS (100 ms interval)  -- balanced
-    High activity (0.7 - 1.0) -> 15 FPS (66 ms interval)   -- max responsiveness
-
-ACTIVITY SCORING
-----------------
-The score is a 0-1 float computed from three signals:
-  1. **Detection count**: more tracked people = higher activity
-  2. **Average speed**: faster objects = higher urgency
-  3. **Frame diff energy**: raw pixel change between consecutive frames
-     (catches new entrances, sudden movements, lighting changes)
-
-All three signals are normalised and combined with equal weight, then smoothed
-with an EMA to avoid the inference rate oscillating erratically.
+IMPORTANT: The zero-motion gate has a warmup period of `_WARMUP_FRAMES` calls
+to feed() before it activates, so the system always runs AI on the first few
+frames and avoids a cold-start deadlock.
 """
-
 from __future__ import annotations
 
+import time
 import cv2
 import numpy as np
 from typing import Any, Dict, List, Optional
 
 from config import config
 
+_WARMUP_FRAMES = 10  # Feed AI for at least this many cycles before gating
+
 
 class AdaptiveInferenceController:
     """
-    Dynamically adjusts AI inference interval based on scene activity.
-
-    Usage in the stream worker:
-
-        controller = AdaptiveInferenceController()
-
-        # After each AI cycle:
-        controller.feed(detections, frame)
-
-        # Before deciding whether to run AI:
-        interval = controller.get_interval()
-        if now - last_ai_time > interval:
-            run_ai()
+    Dynamically adjusts AI inference interval and optionally gates inference
+    on scene motion energy.
     """
 
     def __init__(self) -> None:
-        self._activity_score: float = 0.5         # start neutral
+        self._activity_score: float = 0.5
         self._prev_gray: Optional[np.ndarray] = None
         self._ema_alpha = config.activity_score_ema_alpha
+        self._last_energy: float = 1.0      # start HIGH so gate is open on boot
+        self._last_inference_t: float = 0.0
+        self._feed_count: int = 0           # warmup counter
 
-    # ────────────────────────────────────────────────────── public API ───────
+    # ──────────────────────────────────────────────── public API ─────────
 
-    def feed(
-        self,
-        detections: List[Dict[str, Any]],
-        frame: np.ndarray,
-    ) -> None:
-        """
-        Update the activity score after an AI cycle.
-
-        Parameters
-        ----------
-        detections : list
-            Current confirmed detections (from pipeline result).
-        frame : np.ndarray
-            The raw BGR frame that was just processed.
-        """
+    def feed(self, detections: List[Dict[str, Any]], frame: np.ndarray) -> None:
+        """Update activity score after an AI cycle."""
         if not config.adaptive_inference_enabled:
             return
 
-        # Signal 1: detection count (normalised: 0 people=0, 5+ people=1)
+        self._feed_count += 1
+
+        # Signal 1: person count (0 → 0.0, 5+ → 1.0)
         n_people = sum(1 for d in detections if not d.get("is_object", False))
         count_signal = min(1.0, n_people / 5.0)
 
-        # Signal 2: average speed of person detections
-        speeds = []
-        for d in detections:
-            if not d.get("is_object", False):
-                speed = d.get("speed", 0.0)
-                if isinstance(speed, (int, float)):
-                    speeds.append(float(speed))
-        avg_speed = (sum(speeds) / len(speeds)) if speeds else 0.0
-        # Normalise: 0 px/s=0, 150+ px/s=1
-        speed_signal = min(1.0, avg_speed / 150.0)
+        # Signal 2: average speed
+        speeds = [
+            float(d.get("speed", 0.0))
+            for d in detections
+            if not d.get("is_object", False) and isinstance(d.get("speed"), (int, float))
+        ]
+        speed_signal = min(1.0, (sum(speeds) / len(speeds)) / 150.0) if speeds else 0.0
 
-        # Signal 3: frame-difference energy (cheap motion detector)
-        diff_signal = self._frame_diff_energy(frame)
+        # Signal 3: frame-diff energy (reuses preprocessor thumb when available)
+        energy = self._frame_diff_energy(frame)
+        self._last_energy = energy
 
-        # Combine with equal weights
-        raw_score = (count_signal * 0.35 + speed_signal * 0.30 + diff_signal * 0.35)
-
-        # Smooth with EMA
+        raw_score = count_signal * 0.35 + speed_signal * 0.30 + energy * 0.35
         self._activity_score = (
             self._ema_alpha * raw_score
             + (1.0 - self._ema_alpha) * self._activity_score
         )
 
-    def get_interval(self) -> float:
+    def should_run_inference(self) -> bool:
         """
-        Return the recommended inference interval (seconds).
+        Returns True when the AI thread should process a new frame.
 
-        Maps activity_score linearly between ai_interval_max_s (low activity)
-        and ai_interval_min_s (high activity).
+        Logic:
+          1. Interval gate  — enough wall-clock time since last AI run.
+          2. Warmup bypass  — for the first _WARMUP_FRAMES cycles always allow.
+          3. Zero-motion gate (after warmup) — skip if scene is truly static.
         """
+        now = time.monotonic()
+        if now - self._last_inference_t < self.get_interval():
+            return False
+
+        # Always run during warmup so bboxes appear immediately on stream start
+        if self._feed_count < _WARMUP_FRAMES:
+            self._last_inference_t = now
+            return True
+
+        # Zero-motion gate: only active after warmup
+        if (
+            config.zero_motion_gate_enabled
+            and self._last_energy < config.zero_motion_energy_threshold
+        ):
+            # Scene is static — reset timer without running inference
+            # (we still need to refresh should_run_inference at next call)
+            return False
+
+        self._last_inference_t = now
+        return True
+
+    def get_interval(self) -> float:
+        """Return the recommended inference interval (seconds)."""
         if not config.adaptive_inference_enabled:
             return config.ai_interval_default_s
-
-        # Linear interpolation: high score -> short interval (fast AI)
         score = max(0.0, min(1.0, self._activity_score))
-        interval = (
-            config.ai_interval_max_s
-            - score * (config.ai_interval_max_s - config.ai_interval_min_s)
+        return config.ai_interval_max_s - score * (
+            config.ai_interval_max_s - config.ai_interval_min_s
         )
-        return interval
 
     @property
     def activity_score(self) -> float:
-        """Current smoothed activity score (0-1)."""
         return self._activity_score
 
-    # ────────────────────────────────────────────────────── internals ────────
+    @property
+    def last_energy(self) -> float:
+        return self._last_energy
+
+    # ─────────────────────────────────────────────── internals ───────────
 
     def _frame_diff_energy(self, frame: np.ndarray) -> float:
         """
-        Compute normalised frame-to-frame pixel difference.
-
-        Uses a small grayscale + resize for speed (< 0.5 ms per frame).
-        Returns 0.0 for no change, 1.0 for massive change.
+        Normalised frame-to-frame pixel difference (0 = no change, 1 = huge).
+        Reuses frame_preprocessor's cached thumbnail when available.
         """
-        small = cv2.resize(frame, (160, 120))
-        gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+        try:
+            from modules.frame_preprocessor import frame_preprocessor
+            gray = frame_preprocessor.last_gray_thumb
+        except Exception:
+            gray = None
+
+        if gray is None:
+            small = cv2.resize(frame, (160, 120))
+            gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
 
         if self._prev_gray is None:
             self._prev_gray = gray
-            return 0.0
+            return 1.0  # treat first frame as high-energy (gate open)
 
         diff = cv2.absdiff(gray, self._prev_gray)
         self._prev_gray = gray
-
-        # Mean pixel change normalised to 0-1 (threshold at 40 = big change)
-        energy = float(diff.mean()) / 40.0
-        return min(1.0, energy)
+        return min(1.0, float(diff.mean()) / 40.0)
 
 
 # Module-level singleton

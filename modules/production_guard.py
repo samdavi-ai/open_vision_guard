@@ -204,13 +204,19 @@ class SceneProfiler:
         if not config.scene_profiling_enabled:
             return
 
+        from modules.frame_preprocessor import frame_preprocessor as _fp
+
         profile = self._profiles.setdefault(camera_id, SceneProfile())
         profile.frame_count += 1
-        alpha = 0.05  # Slow EMA for stable profiles
+        alpha = 0.05
+
+        # Reuse preprocessor's cached thumbnail; fall back to local compute
+        gray = _fp.last_gray_thumb
+        if gray is None:
+            gray = cv2.cvtColor(cv2.resize(frame, (160, 120)), cv2.COLOR_BGR2GRAY)
 
         # Brightness
-        gray = cv2.cvtColor(cv2.resize(frame, (160, 120)), cv2.COLOR_BGR2GRAY)
-        brightness = float(gray.mean())
+        brightness = _fp.last_brightness if gray is _fp.last_gray_thumb else float(gray.mean())
         profile.avg_brightness = alpha * brightness + (1 - alpha) * profile.avg_brightness
         profile.is_low_light = profile.avg_brightness < 60
 
@@ -219,11 +225,10 @@ class SceneProfiler:
         profile.avg_density = alpha * n_people + (1 - alpha) * profile.avg_density
         profile.is_crowded = profile.avg_density > 5
 
-        # Motion energy
+        # Motion energy (uses same thumbnail)
         if camera_id in self._prev_grays:
             diff = cv2.absdiff(gray, self._prev_grays[camera_id])
-            energy = float(diff.mean()) / 40.0
-            energy = min(1.0, energy)
+            energy = min(1.0, float(diff.mean()) / 40.0)
             profile.motion_energy = alpha * energy + (1 - alpha) * profile.motion_energy
             profile.is_static = profile.motion_energy < 0.05
         self._prev_grays[camera_id] = gray

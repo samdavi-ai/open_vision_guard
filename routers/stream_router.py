@@ -127,12 +127,9 @@ def _update_crops(frame: 'np.ndarray', detections: list, camera_id: str):
 
 def _ai_inference_thread(camera_id: str, pipeline, shared_state: dict):
     """
-    Background AI thread: continuously picks up the latest frame from
-    shared_state and runs pipeline inference.  Results are written back
-    into shared_state so the display thread can read them without blocking.
-
-    This thread runs as fast as the model allows — it is never throttled
-    by video FPS and never blocks the display loop.
+    Background AI thread: picks up frames from shared_state, runs inference,
+    writes results back. Uses adaptive_controller.should_run_inference() which
+    incorporates both the interval gate and the zero-motion gate (with warmup).
     """
     from modules.adaptive_inference import adaptive_controller
     from modules.production_guard import (
@@ -141,34 +138,37 @@ def _ai_inference_thread(camera_id: str, pipeline, shared_state: dict):
     )
 
     while shared_state["running"]:
-        # Wait until the display thread provides a new frame
         frame = shared_state.get("ai_frame")
         if frame is None:
             time.sleep(0.005)
             continue
 
-        # Grab and clear so we don't re-process the same frame
+        # Check interval + motion gate. If not ready, sleep briefly and retry.
+        if not adaptive_controller.should_run_inference():
+            time.sleep(0.005)
+            continue
+
+        # Consume the frame — take a copy so the display thread can overwrite safely
         shared_state["ai_frame"] = None
+        work_frame = frame.copy()
 
         try:
             t0 = time.monotonic()
-            result = pipeline.process_frame(frame, camera_id)
+            result = pipeline.process_frame(work_frame, camera_id)
             ai_latency = (time.monotonic() - t0) * 1000
 
             shared_state["detections"] = result.current_detections
             shared_state["alerts"] = result.alerts
             shared_state["ai_latency_ms"] = ai_latency
 
-            # Feed production hardening subsystems
-            adaptive_controller.feed(result.current_detections, frame)
+            adaptive_controller.feed(result.current_detections, work_frame)
             threshold_calibrator.feed(camera_id, result.current_detections)
-            scene_profiler.update(camera_id, frame, result.current_detections)
-            edge_events = edge_detector.check(camera_id, frame, len(result.current_detections))
+            scene_profiler.update(camera_id, work_frame, result.current_detections)
+            edge_events = edge_detector.check(camera_id, work_frame, len(result.current_detections))
             if edge_events.get("lighting_change"):
-                print(f"[EdgeCase] {camera_id}: Sudden lighting change detected")
+                print(f"[EdgeCase] {camera_id}: lighting change")
             if edge_events.get("camera_shake"):
-                print(f"[EdgeCase] {camera_id}: Camera shake detected")
-
+                print(f"[EdgeCase] {camera_id}: camera shake")
             latency_guard.record(ai_latency)
 
         except Exception as e:
@@ -180,17 +180,16 @@ def _ai_inference_thread(camera_id: str, pipeline, shared_state: dict):
 def _stream_worker(camera_id: str, source: str):
     """
     Display-thread worker: reads video at native FPS, draws cached detections,
-    and sends frames over WebSocket.  AI inference runs in a separate background
-    thread so the video NEVER slows down or stutters.
+    encodes JPEG, and pushes over WebSocket.  AI runs in a parallel thread.
 
-    Architecture:
-      Display thread (this)     — reads frames, draws bboxes, encodes JPEG, sleeps
-                                   to maintain native FPS.  Never calls pipeline.
-      AI thread (_ai_inference_thread) — picks up latest frame, runs YOLO, writes
-                                   detections back.  Runs as fast as model allows.
+    Optimizations vs previous version:
+      - Adaptive display width and JPEG quality based on activity score.
+      - Crop rebuild skipped when detection IDs haven't changed.
+      - Hardcoded display constants replaced with config values.
     """
     import cv2 as _cv2
     from modules.detection_memory import DetectionMemory
+    from modules.adaptive_inference import adaptive_controller
     from modules.production_guard import (
         latency_guard, scene_profiler, threshold_calibrator,
     )
@@ -210,20 +209,17 @@ def _stream_worker(camera_id: str, source: str):
 
     active_streams[camera_id]["status"] = "running"
 
-    # Per-camera detection memory for interpolation between AI frames
-    memory = DetectionMemory(ttl_frames=12, interpolate=True)
+    memory = DetectionMemory(ttl_frames=12, interpolate=True, video_fps=native_fps)
 
-    # Shared state between display thread and AI thread
     shared_state = {
         "running": True,
-        "ai_frame": None,        # display thread writes, AI thread reads
-        "detections": [],        # AI thread writes, display thread reads
+        "ai_frame": None,
+        "detections": [],
         "alerts": [],
         "ai_latency_ms": 0.0,
         "ai_done": False,
     }
 
-    # Start the background AI inference thread
     ai_thread = threading.Thread(
         target=_ai_inference_thread,
         args=(camera_id, pipeline, shared_state),
@@ -234,11 +230,9 @@ def _stream_worker(camera_id: str, source: str):
 
     detections = []
     frame_count = 0
-
-    # Pre-compute a target display width for fast encoding
-    # Encoding full-res (1920px) JPEG at 25fps is too heavy for CPU
-    _DISPLAY_WIDTH = 640
-    _JPEG_QUALITY = 55   # Lower quality = much faster encoding
+    _last_crop_ids: frozenset = frozenset()   # track IDs in last crop update
+    _cached_location = geolocation_engine.get_current_location()  # cache once
+    _loc_refresh_counter = 0
 
     while active_streams.get(camera_id, {}).get("status") == "running":
         t0 = time.monotonic()
@@ -250,90 +244,99 @@ def _stream_worker(camera_id: str, source: str):
             continue
 
         frame_count += 1
-
-        # Store raw frame (shared ref, no copy needed for read-only consumers)
         _latest_raw_frames[camera_id] = {"frame": frame, "timestamp": time.time()}
 
-        # Submit frame to AI thread if it's ready (not currently processing)
-        if shared_state["ai_frame"] is None:
-            shared_state["ai_frame"] = frame.copy()
+        # Feed AI thread the latest frame (overwrite — we only care about newest)
+        shared_state["ai_frame"] = frame  # no copy; AI thread reads only
 
-        # Check if AI thread produced new detections
+        # Consume new AI detections if available
         ai_detections = shared_state["detections"]
         if ai_detections:
-            # New AI results arrived — update memory with fresh detections
             memory.update(ai_detections)
             detections = ai_detections
             active_streams[camera_id]["latest_alerts"] = shared_state["alerts"]
-            shared_state["detections"] = []  # consumed
+            shared_state["detections"] = []
             shared_state["alerts"] = []
         else:
-            # No new AI results yet — use interpolated positions from memory
             memory.tick()
             detections = memory.get_active()
 
         active_streams[camera_id]["latest_detections"] = detections
 
-        # Update crops only every 5 frames to reduce overhead
-        if frame_count % 5 == 0:
-            _update_crops(frame, detections, camera_id)
+        # Smart crop update: only rebuild when the tracked identity set changes
+        if frame_count % config.crop_update_interval == 0:
+            current_ids = frozenset(
+                d["global_id"] for d in detections if not d.get("is_object", False)
+            )
+            if current_ids != _last_crop_ids:
+                _update_crops(frame, detections, camera_id)
+                _last_crop_ids = current_ids
 
-        # --- Fast display pipeline: downscale → draw → encode ----------------
+        # --- Adaptive display pipeline: downscale → draw → encode -------------
         h_orig, w_orig = frame.shape[:2]
+        activity = adaptive_controller.activity_score
+        high_activity = activity >= config.activity_high_threshold
+        display_w = (
+            config.display_width_high_activity if high_activity
+            else config.display_width_low_activity
+        )
+        jpeg_q = (
+            config.jpeg_quality_high_activity if high_activity
+            else config.jpeg_quality_low_activity
+        )
 
-        # Downscale for fast encoding if frame is large
-        if w_orig > _DISPLAY_WIDTH:
-            scale = _DISPLAY_WIDTH / w_orig
-            new_w = _DISPLAY_WIDTH
-            new_h = int(h_orig * scale)
-            display_frame = _cv2.resize(frame, (new_w, new_h), interpolation=_cv2.INTER_NEAREST)
-
-            # Scale detection bboxes to display resolution
-            scaled_detections = []
+        if w_orig > display_w:
+            scale = display_w / w_orig
+            display_frame = _cv2.resize(
+                frame, (display_w, int(h_orig * scale)),
+                interpolation=_cv2.INTER_NEAREST,
+            )
+            scaled_dets = []
             for det in detections:
                 sd = dict(det)
                 x1, y1, x2, y2 = det["bbox"]
-                sd["bbox"] = [int(x1 * scale), int(y1 * scale),
-                              int(x2 * scale), int(y2 * scale)]
-                scaled_detections.append(sd)
-            annotated = _draw_detections(display_frame, scaled_detections)
+                sd["bbox"] = [int(x1*scale), int(y1*scale), int(x2*scale), int(y2*scale)]
+                scaled_dets.append(sd)
+            annotated = _draw_detections(display_frame, scaled_dets)
         else:
             annotated = _draw_detections(frame, detections)
 
-        # Encode to JPEG (fast: small frame + low quality)
-        _, jpeg_buf = _cv2.imencode('.jpg', annotated,
-                                    [_cv2.IMWRITE_JPEG_QUALITY, _JPEG_QUALITY])
+        _, jpeg_buf = _cv2.imencode('.jpg', annotated, [_cv2.IMWRITE_JPEG_QUALITY, jpeg_q])
         b64 = base64.b64encode(jpeg_buf.tobytes()).decode('utf-8')
 
-        # Build WebSocket payload (use cached location, skip scene profiling overhead)
+        # Refresh geolocation only every 150 frames (~6 seconds at 25 FPS)
+        _loc_refresh_counter += 1
+        if _loc_refresh_counter >= 150:
+            _cached_location = geolocation_engine.get_current_location()
+            _loc_refresh_counter = 0
+
         display_latency_ms = (time.monotonic() - t0) * 1000
+        scene = scene_profiler.get_profile(camera_id)
         active_streams[camera_id]["latest_ws_payload"] = json.dumps({
             "frame": b64,
             "width": annotated.shape[1],
             "height": annotated.shape[0],
             "detections": detections,
-            "fps": int(1.0 / (time.monotonic() - t0 + 0.001)),
+            "fps": int(1.0 / max(0.001, time.monotonic() - t0)),
             "timestamp": datetime.datetime.now().astimezone().isoformat(),
-            "latitude": geolocation_engine.get_current_location()["latitude"],
-            "longitude": geolocation_engine.get_current_location()["longitude"],
+            "latitude": _cached_location["latitude"],
+            "longitude": _cached_location["longitude"],
             "latency_ms": round(display_latency_ms, 1),
             "ai_latency_ms": round(shared_state["ai_latency_ms"], 1),
             "latency_status": latency_guard.status,
-            "scene_brightness": round(scene_profiler.get_profile(camera_id).avg_brightness, 1),
-            "scene_density": round(scene_profiler.get_profile(camera_id).avg_density, 1),
+            "scene_brightness": round(scene.avg_brightness, 1),
+            "scene_density": round(scene.avg_density, 1),
             "adaptive_conf": round(threshold_calibrator.get_threshold(camera_id), 3),
+            "activity_score": round(activity, 3),
         })
 
-        # Sleep to maintain native video FPS — this is the key to normal speed
         elapsed = time.monotonic() - t0
         remaining = frame_delay - elapsed
         if remaining > 0:
             time.sleep(remaining)
 
-    # Shut down AI thread cleanly
     shared_state["running"] = False
     ai_thread.join(timeout=3.0)
-
     cap.release()
     active_streams[camera_id]["status"] = "stopped"
 
@@ -346,11 +349,15 @@ async def upload_video(file: UploadFile = File(...)):
     try:
         upload_dir = os.path.join("data", "uploads")
         os.makedirs(upload_dir, exist_ok=True)
-        path = os.path.join(upload_dir, file.filename)
-        content = await file.read()
-        print(f"[Upload] File size: {len(content)} bytes")
+        # Use only the basename to prevent directory traversal or absolute path issues
+        filename = os.path.basename(file.filename)
+        path = os.path.join(upload_dir, filename)
+        
+        # Stream the file to disk in chunks to handle large files efficiently
         with open(path, "wb") as f:
-            f.write(content)
+            while chunk := await file.read(1024 * 1024): # 1MB chunks
+                f.write(chunk)
+                
         print(f"[Upload] Saved to: {path}")
         return {"message": "Uploaded", "path": path}
     except Exception as e:

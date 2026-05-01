@@ -490,7 +490,6 @@ class Pipeline:
         return config.vehicle_conf_threshold
 
     def __init__(self, yolo_model_path: str = "", device: str = "") -> None:
-        # Honour explicit arguments (for backward compat) but fall back to config
         model_path = yolo_model_path or config.yolo_model_path
         infer_device = device or config.yolo_device
         print(f"[Pipeline] Loading model: {model_path} on device: {infer_device}")
@@ -500,12 +499,13 @@ class Pipeline:
         self.track_states: Dict[str, TrackState] = {}
         self.identity_records: Dict[str, Dict[str, Any]] = {}
         self._object_counter = 0
-        # Temporal buffer: eliminates flickering and short ghost detections
         self._temporal_buffer = TemporalBuffer(
             confirm_frames=config.temporal_confirm_frames,
             hold_frames=config.temporal_hold_frames,
             smoothing_alpha=config.bbox_smoothing_alpha,
         )
+        # DB write throttle: last flush time per identity (avoids write flood)
+        self._db_last_flush: Dict[str, float] = {}
         database.init_db()
         print("[Pipeline] Ready.")
 
@@ -524,18 +524,24 @@ class Pipeline:
         # Import production guard singletons for dynamic, scene-aware inference
         from modules.production_guard import latency_guard, scene_profiler, threshold_calibrator
 
-        # ── CLAHE preprocessing for low-light improvement ────────────────────
-        inference_frame = frame_preprocessor.enhance(frame)
+        # Gate CLAHE on scene brightness (skip in well-lit conditions)
+        scene = scene_profiler.get_profile(camera_id)
+        inference_frame = frame_preprocessor.enhance(frame, scene_brightness=scene.avg_brightness)
 
         # Dynamic tracker confidence:
         # Start from calibrated camera threshold, then adjust to scene difficulty.
-        scene = scene_profiler.get_profile(camera_id)
-        dynamic_tracker_conf = threshold_calibrator.get_threshold(camera_id) - 0.05
+        dynamic_tracker_conf = (
+            threshold_calibrator.get_threshold(camera_id)
+            + config.tracker_conf_base_offset
+        )
         if scene.is_low_light:
-            dynamic_tracker_conf -= 0.02
+            dynamic_tracker_conf += config.tracker_conf_low_light_delta
         if scene.is_crowded:
-            dynamic_tracker_conf += 0.02
-        dynamic_tracker_conf = max(0.08, min(0.45, dynamic_tracker_conf))
+            dynamic_tracker_conf += config.tracker_conf_crowded_delta
+        dynamic_tracker_conf = max(
+            config.tracker_conf_min,
+            min(config.tracker_conf_max, dynamic_tracker_conf),
+        )
 
         # Primary pass at config resolution (640px) with ByteTrack
         yolo = self.yolo_model.track(
@@ -544,7 +550,7 @@ class Pipeline:
             verbose=False,
             imgsz=config.yolo_imgsz,
             conf=dynamic_tracker_conf,
-            iou=0.55,
+            iou=config.tracker_nms_iou,
             device=self.device,
             tracker="bytetrack.yaml",
         )[0]
@@ -706,7 +712,10 @@ class Pipeline:
 
             # Scene-aware object thresholding for better recall in dark scenes.
             if scene.is_low_light:
-                threshold = max(0.10, threshold - 0.03)
+                threshold = max(
+                    config.object_low_light_conf_min,
+                    threshold + config.object_low_light_conf_delta,
+                )
 
             if cls_id in self.COCO_NAMES and conf >= threshold:
                 if not self._valid_object_box((x1, y1, x2, y2), frame_shape):
@@ -746,7 +755,10 @@ class Pipeline:
             return False
         if aspect < config.person_min_aspect or aspect > config.person_max_aspect:
             return False
-        if bh > h * 0.92 and bw < w * 0.08:
+        if (
+            bh > h * config.person_edge_tall_height_ratio
+            and bw < w * config.person_edge_tall_width_ratio
+        ):
             return False
         return True
 
@@ -755,11 +767,14 @@ class Pipeline:
         h, w = frame_shape
         x1, y1, x2, y2 = bbox
         bw, bh = x2 - x1, y2 - y1
-        if bw < 5 or bh < 5:
+        if bw < config.object_min_width_px or bh < config.object_min_height_px:
             return False
         area_ratio = (bw * bh) / max(1.0, float(w * h))
         aspect = bw / max(1.0, float(bh))
-        return 0.000025 <= area_ratio <= 0.45 and 0.08 <= aspect <= 8.0
+        return (
+            config.object_min_area_ratio <= area_ratio <= config.object_max_area_ratio
+            and config.object_min_aspect <= aspect <= config.object_max_aspect
+        )
 
     def _small_object_reinference(
         self,
@@ -792,14 +807,17 @@ class Pipeline:
             bbox_area = float((x2 - x1) * (y2 - y1))
             if bbox_area / frame_area < threshold:
                 # Pad the crop region by 2x the person height for context
-                pad_h = max(80, (y2 - y1) * 2)
-                pad_w = max(80, (x2 - x1) * 2)
+                pad_h = max(config.reinference_min_pad_px, (y2 - y1) * config.reinference_pad_scale)
+                pad_w = max(config.reinference_min_pad_px, (x2 - x1) * config.reinference_pad_scale)
                 rx1 = max(0, x1 - pad_w)
                 ry1 = max(0, y1 - pad_h)
                 rx2 = min(w, x2 + pad_w)
                 ry2 = min(h, y2 + pad_h)
                 # Ensure minimum crop size
-                if (rx2 - rx1) >= 64 and (ry2 - ry1) >= 64:
+                if (
+                    (rx2 - rx1) >= config.reinference_min_crop_size_px
+                    and (ry2 - ry1) >= config.reinference_min_crop_size_px
+                ):
                     small_regions.append((rx1, ry1, rx2, ry2))
 
         if not small_regions:
@@ -824,8 +842,8 @@ class Pipeline:
                     crop,
                     verbose=False,
                     imgsz=config.reinference_imgsz,
-                    conf=config.person_conf_threshold * 0.8,  # slightly lower threshold
-                    iou=0.55,
+                    conf=config.person_conf_threshold * config.reinference_conf_scale,
+                    iou=config.tracker_nms_iou,
                     device=self.device,
                     classes=[0],  # person only
                 )
@@ -942,7 +960,7 @@ class Pipeline:
                 verbose=False,
                 imgsz=config.multiscale_imgsz,
                 conf=config.secondary_conf_threshold,
-                iou=0.50,
+                iou=config.multiscale_nms_iou,
                 device=self.device,
                 classes=[0],   # person only
             )
@@ -1007,17 +1025,17 @@ class Pipeline:
                 x2 >= w - margin,
                 y2 >= h - margin,
             ])
-            if sides_clipped >= 3:
+            if sides_clipped >= config.hnf_min_clipped_sides:
                 continue
 
             # Rule 2: hyper-tall sliver (after passing geometry filter)
             aspect = bw / max(1.0, float(bh))
-            if aspect < 0.04:
+            if aspect < config.hnf_min_aspect_ratio:
                 continue
 
             # Rule 3: floating top-of-frame ghost
             cy = (y1 + y2) / 2.0
-            if cy < h * 0.05 and bh < h * 0.08:
+            if cy < h * config.hnf_top_band_ratio and bh < h * config.hnf_small_height_ratio:
                 continue
 
             kept.append(det)
@@ -1238,25 +1256,29 @@ class Pipeline:
             "history": [],
         }
 
-        database.save_detection({
-            "object_id": global_id,
-            "material": "person",
-            "confidence": person["confidence"],
-            "size": f"{x2 - x1}x{y2 - y1}",
-            "timestamp": now_iso,
-            "latitude": location.get("latitude"),
-            "longitude": location.get("longitude"),
-        })
-        database.save_person_log({
-            "person_id": global_id,
-            "timestamp": now_iso,
-            "position_x": cx,
-            "position_y": cy,
-            "speed": speed_px_s,
-            "zone": "General",
-            "event_type": behaviour_label,
-        })
-        database.save_identity(self.identity_records[global_id])
+        # DB write throttle: flush at most once every db_write_interval_s per identity
+        _now_m = time.monotonic()
+        if _now_m - self._db_last_flush.get(global_id, 0.0) >= config.db_write_interval_s:
+            self._db_last_flush[global_id] = _now_m
+            database.save_detection({
+                "object_id": global_id,
+                "material": "person",
+                "confidence": person["confidence"],
+                "size": f"{x2 - x1}x{y2 - y1}",
+                "timestamp": now_iso,
+                "latitude": location.get("latitude"),
+                "longitude": location.get("longitude"),
+            })
+            database.save_person_log({
+                "person_id": global_id,
+                "timestamp": now_iso,
+                "position_x": cx,
+                "position_y": cy,
+                "speed": speed_px_s,
+                "zone": "General",
+                "event_type": behaviour_label,
+            })
+            database.save_identity(self.identity_records[global_id])
 
         alert = None
         if behaviour_alert:
@@ -1465,5 +1487,5 @@ class Pipeline:
         stale = [gid for gid, state in self.track_states.items() if now - state.last_seen > config.track_stale_after_s]
         for gid in stale:
             self.track_states.pop(gid, None)
-            # Also evict from temporal buffer so hold-state doesn't linger
             self._temporal_buffer.reset(gid)
+            self._db_last_flush.pop(gid, None)  # prune throttle dict
