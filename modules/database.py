@@ -65,7 +65,8 @@ def init_db():
               camera_id VARCHAR,
               timestamp TIMESTAMP,
               thumbnail_path VARCHAR,
-              acknowledged BOOLEAN DEFAULT FALSE
+              acknowledged BOOLEAN DEFAULT FALSE,
+              metadata_json TEXT
             );
             ''')
             
@@ -198,10 +199,14 @@ def save_alert(alert: Dict[str, Any]):
         return
     conn = db_pool.getconn()
     try:
+        # Extract metadata (exclude standard fields to avoid redundancy)
+        standard_keys = {'alert_id', 'severity', 'type', 'message', 'global_id', 'camera_id', 'timestamp', 'thumbnail_path', 'acknowledged'}
+        metadata = {k: v for k, v in alert.items() if k not in standard_keys}
+        
         with conn.cursor() as cursor:
             cursor.execute('''
-                INSERT INTO alerts (alert_id, severity, type, message, global_id, camera_id, timestamp, thumbnail_path, acknowledged)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                INSERT INTO alerts (alert_id, severity, type, message, global_id, camera_id, timestamp, thumbnail_path, acknowledged, metadata_json)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ''', (
                 alert['alert_id'],
                 alert['severity'],
@@ -211,7 +216,8 @@ def save_alert(alert: Dict[str, Any]):
                 alert['camera_id'],
                 alert['timestamp'] or datetime.datetime.now().astimezone().isoformat(),
                 alert.get('thumbnail_path'),
-                alert.get('acknowledged', False)
+                alert.get('acknowledged', False),
+                json.dumps(metadata)
             ))
             conn.commit()
     finally:
@@ -320,7 +326,17 @@ def get_alerts(acknowledged: Optional[bool] = None) -> List[Dict[str, Any]]:
                 cursor.execute("SELECT * FROM alerts ORDER BY timestamp DESC")
             else:
                 cursor.execute("SELECT * FROM alerts WHERE acknowledged = %s ORDER BY timestamp DESC", (acknowledged,))
-            return cursor.fetchall()
+            
+            alerts = cursor.fetchall()
+            # Deserialize metadata
+            for alert in alerts:
+                if alert.get('metadata_json'):
+                    try:
+                        meta = json.loads(alert['metadata_json'])
+                        alert.update(meta)
+                    except:
+                        pass
+            return alerts
     finally:
         db_pool.putconn(conn)
 
