@@ -1,22 +1,35 @@
-from ultralytics import YOLO
 import cv2
 import numpy as np
+import mediapipe as mp
 from typing import Dict, Any, List, Optional
 from collections import defaultdict
 from config import config
 
-
 class PoseAnalyzer:
-    def __init__(self, model_path: str = "yolov8n-pose.pt"):
-        self.model = YOLO(model_path)
-        # Rolling buffer: global_id -> list of keypoint sets (last 3 frames)
-        self.keypoint_buffers: Dict[str, List[np.ndarray]] = defaultdict(list)
+    def __init__(self, model_path: str = None):
+        # We drop YOLOv8 Pose and use MediaPipe for lighter weight
+        try:
+            self.mp_pose = mp.solutions.pose
+            self.pose = self.mp_pose.Pose(
+                static_image_mode=False,
+                model_complexity=1,  # 0 is fastest/lightest, 1 is balanced, 2 is heavy
+                min_detection_confidence=0.5,
+                min_tracking_confidence=0.5
+            )
+            self.mp_drawing = mp.solutions.drawing_utils
+            self.available = True
+        except AttributeError:
+            print("[PoseAnalyzer] Warning: MediaPipe solutions API not found. Pose analysis disabled.")
+            self.available = False
+        self.keypoint_buffers: Dict[str, List[Any]] = defaultdict(list)
 
     def analyze_pose(self, frame: np.ndarray, bbox: tuple) -> Dict[str, Any]:
         """
-        Analyze pose for a person within the given bbox region.
-        Returns: {activity, keypoints, fall_detected, confidence}
+        Analyze pose for a person within the given bbox region using MediaPipe.
         """
+        if not getattr(self, 'available', False):
+            return {"activity": "unknown", "keypoints": None, "fall_detected": False, "confidence": 0.0}
+
         x1, y1, x2, y2 = map(int, bbox)
         x1, y1 = max(0, x1), max(0, y1)
         x2 = min(frame.shape[1], x2)
@@ -26,18 +39,18 @@ class PoseAnalyzer:
         if crop.size == 0:
             return {"activity": "unknown", "keypoints": None, "fall_detected": False, "confidence": 0.0}
 
-        results = self.model(crop, classes=[0], verbose=False)
-        result = results[0]
-
-        keypoints = result.keypoints.data.cpu().numpy() if result.keypoints is not None else None
+        # MediaPipe needs RGB
+        crop_rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
+        results = self.pose.process(crop_rgb)
 
         activity = "standing"
         fall_detected = False
         confidence = 0.0
+        keypoints = None
 
-        if keypoints is not None and len(keypoints) > 0:
-            kp = keypoints[0]
-            activity, fall_detected, confidence = self._classify_activity(kp)
+        if results.pose_landmarks:
+            keypoints = results.pose_landmarks.landmark
+            activity, fall_detected, confidence = self._classify_activity(keypoints, crop.shape)
 
         return {
             "activity": activity,
@@ -46,54 +59,68 @@ class PoseAnalyzer:
             "confidence": confidence
         }
 
-    def _classify_activity(self, kp: np.ndarray) -> tuple:
+    def _classify_activity(self, landmarks, shape) -> tuple:
         """
-        Heuristic activity classification from COCO keypoints.
-        KP Indices: 0:nose, 5:l_shoulder, 6:r_shoulder, 11:l_hip, 12:r_hip, 15:l_ankle, 16:r_ankle
+        Heuristic activity classification from MediaPipe landmarks.
         """
-        if len(kp) < 17:
-            return "unknown", False, 0.0
+        h, w, _ = shape
+        
+        nose = landmarks[self.mp_pose.PoseLandmark.NOSE.value]
+        l_shoulder = landmarks[self.mp_pose.PoseLandmark.LEFT_SHOULDER.value]
+        r_shoulder = landmarks[self.mp_pose.PoseLandmark.RIGHT_SHOULDER.value]
+        l_hip = landmarks[self.mp_pose.PoseLandmark.LEFT_HIP.value]
+        r_hip = landmarks[self.mp_pose.PoseLandmark.RIGHT_HIP.value]
+        l_ankle = landmarks[self.mp_pose.PoseLandmark.LEFT_ANKLE.value]
+        r_ankle = landmarks[self.mp_pose.PoseLandmark.RIGHT_ANKLE.value]
 
-        nose = kp[0]
-        l_shoulder, r_shoulder = kp[5], kp[6]
-        l_hip, r_hip = kp[11], kp[12]
-        l_ankle, r_ankle = kp[15], kp[16]
+        # Convert normalized coordinates to pixel coordinates
+        nose_y = nose.y * h
+        hip_y = ((l_hip.y + r_hip.y) / 2) * h
+        ankle_y = ((l_ankle.y + r_ankle.y) / 2) * h
+        shoulder_y = ((l_shoulder.y + r_shoulder.y) / 2) * h
+        shoulder_width = abs(l_shoulder.x - r_shoulder.x) * w
 
-        # Fall detection: head Y > hip Y (in image coords, Y increases downward)
-        hip_y = (l_hip[1] + r_hip[1]) / 2
-        nose_conf = nose[2]
-        hip_conf = (l_hip[2] + r_hip[2]) / 2
+        confidence = min(nose.visibility, l_hip.visibility, r_hip.visibility)
 
-        if nose_conf > config.fall_confidence_threshold and hip_conf > config.fall_confidence_threshold:
-            if nose[1] > hip_y:
-                return "falling", True, float(min(nose_conf, hip_conf))
+        # Fall detection
+        if confidence > config.fall_confidence_threshold:
+            if nose_y > hip_y:
+                return "falling", True, float(confidence)
 
-        # Sitting: ankles close to hips vertically (compressed skeleton)
-        ankle_y = (l_ankle[1] + r_ankle[1]) / 2
-        shoulder_y = (l_shoulder[1] + r_shoulder[1]) / 2
+        # Sitting
         body_height = abs(ankle_y - shoulder_y)
-        body_width = abs(l_shoulder[0] - r_shoulder[0])
-
-        if body_height > 0 and body_width > 0:
-            aspect_ratio = body_height / body_width
+        if body_height > 0 and shoulder_width > 0:
+            aspect_ratio = body_height / shoulder_width
             if aspect_ratio < 1.2:
-                return "sitting", False, float(hip_conf)
+                return "sitting", False, float(confidence)
 
-        # Crouching: hips close to ankles
+        # Crouching
         hip_to_ankle = abs(hip_y - ankle_y)
         shoulder_to_hip = abs(shoulder_y - hip_y)
         if shoulder_to_hip > 0 and hip_to_ankle / shoulder_to_hip < 0.5:
-            return "crouching", False, float(hip_conf)
+            return "crouching", False, float(confidence)
 
-        return "standing", False, float(hip_conf)
+        return "standing", False, float(confidence)
 
     def detect_pose_full_frame(self, frame: np.ndarray):
         """
-        Run pose detection on full frame (used for drawing).
-        Returns (annotated_frame, keypoints_data).
+        Run pose detection on full frame for drawing.
         """
-        results = self.model(frame, classes=[0], verbose=False)
-        result = results[0]
-        annotated_frame = result.plot()
-        keypoints = result.keypoints.data.cpu().numpy() if result.keypoints is not None else None
-        return annotated_frame, keypoints
+        if not getattr(self, 'available', False):
+            return frame.copy(), None
+
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        results = self.pose.process(frame_rgb)
+        
+        annotated_frame = frame.copy()
+        if results.pose_landmarks:
+            self.mp_drawing.draw_landmarks(
+                annotated_frame,
+                results.pose_landmarks,
+                self.mp_pose.POSE_CONNECTIONS
+            )
+            
+        return annotated_frame, results.pose_landmarks
+
+# Singleton instance
+pose_analyzer = PoseAnalyzer()

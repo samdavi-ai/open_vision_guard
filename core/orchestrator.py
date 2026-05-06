@@ -82,10 +82,14 @@ class SystemWatchdog:
         t0 = time.time()
         db_state = "healthy"
         try:
-            with get_connection() as conn:
+            conn = get_connection()
+            try:
                 cursor = conn.cursor()
                 cursor.execute("SELECT 1")
                 cursor.fetchone()
+            finally:
+                from modules.database import release_connection
+                release_connection(conn)
         except Exception as e:
             db_state = f"error: {str(e)}"
             overall_status = "critical"

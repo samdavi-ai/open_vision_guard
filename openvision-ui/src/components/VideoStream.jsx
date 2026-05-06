@@ -4,7 +4,7 @@ import React, { useEffect, useRef, useState, useCallback } from 'react';
  * VideoStream renders the annotated JPEG frames and overlays interactive
  * click-targets on top of each detected person with enriched info on hover.
  */
-export default function VideoStream({ wsUrl, setFps, onPersonClick }) {
+export default function VideoStream({ streamId, subscribeToFrames, setFps, onPersonClick }) {
   const [frameSrc, setFrameSrc]   = useState(null);
   const [detections, setDetections] = useState([]);
   const [dims, setDims]            = useState({ w: 1, h: 1 });
@@ -12,7 +12,6 @@ export default function VideoStream({ wsUrl, setFps, onPersonClick }) {
   const [hoveredId, setHoveredId]  = useState(null);
   const [streamMeta, setStreamMeta] = useState({ timestamp: null, lat: null, lon: null });
 
-  const wsRef        = useRef(null);
   const containerRef = useRef(null);
   const imgRef       = useRef(null);
   const fpsCount     = useRef(0);
@@ -23,20 +22,16 @@ export default function VideoStream({ wsUrl, setFps, onPersonClick }) {
     return () => clearInterval(id);
   }, [setFps]);
 
-  /* ── WebSocket ── */
+  /* ── WebSocket Subscription ── */
   useEffect(() => {
-    const ws = new WebSocket(wsUrl);
-    wsRef.current = ws;
-    ws.onmessage = (e) => {
-      const d = JSON.parse(e.data);
+    return subscribeToFrames(streamId, (d) => {
       fpsCount.current++;
       setFrameSrc(`data:image/jpeg;base64,${d.frame}`);
       setDims({ w: d.width || 1, h: d.height || 1 });
       setDetections(d.detections || []);
       setStreamMeta({ timestamp: d.timestamp, lat: d.latitude, lon: d.longitude });
-    };
-    return () => ws.close();
-  }, [wsUrl]);
+    });
+  }, [streamId, subscribeToFrames]);
 
   /* ── Measure actual image bounds ── */
   const measureImage = useCallback(() => {

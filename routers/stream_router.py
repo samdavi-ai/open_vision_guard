@@ -19,8 +19,13 @@ from modules.geolocation import geolocation_engine
 router = APIRouter(tags=["Stream"])
 
 active_streams: Dict[str, Dict[str, Any]] = {}
-_pipeline: Pipeline = None
-_pipeline_lock = threading.Lock()
+
+# Per-camera dedicated Pipeline instances.
+# CRITICAL: Each camera MUST have its own Pipeline because YOLO's ByteTrack
+# tracker maintains internal state. Sharing one instance across cameras causes
+# tracker state corruption, making all but the first camera go blank.
+_camera_pipelines: Dict[str, Pipeline] = {}
+_pipelines_lock = threading.Lock()
 
 # camera_id → {frame, timestamp}
 _latest_raw_frames: Dict[str, Any] = {}
@@ -49,13 +54,23 @@ CATEGORY_COLORS_BGR = {
 }
 
 
+def get_pipeline_for_camera(camera_id: str) -> Pipeline:
+    """Returns a dedicated Pipeline instance for the given camera.
+    Each camera gets its own instance so ByteTrack state never collides."""
+    if camera_id not in _camera_pipelines:
+        with _pipelines_lock:
+            if camera_id not in _camera_pipelines:
+                print(f"[Stream] Creating dedicated Pipeline for {camera_id}")
+                _camera_pipelines[camera_id] = Pipeline()
+    return _camera_pipelines[camera_id]
+
+
+# Keep backward-compat alias used by orchestrator health check
 def get_pipeline() -> Pipeline:
-    global _pipeline
-    if _pipeline is None:
-        with _pipeline_lock:
-            if _pipeline is None:
-                _pipeline = Pipeline()
-    return _pipeline
+    """Returns any available pipeline (for health checks). Use get_pipeline_for_camera() for streaming."""
+    if _camera_pipelines:
+        return next(iter(_camera_pipelines.values()))
+    return get_pipeline_for_camera("__default__")
 
 
 def _draw_detections(frame: 'np.ndarray', detections: list) -> 'np.ndarray':
@@ -115,6 +130,7 @@ def _update_crops(frame: 'np.ndarray', detections: list, camera_id: str):
     for det in detections:
         gid = det["global_id"]
         x1, y1, x2, y2 = det["bbox"]
+        x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
         pad = 30
         cx1, cy1 = max(0, x1 - pad), max(0, y1 - pad)
         cx2, cy2 = min(w, x2 + pad), min(h, y2 + pad)
@@ -125,17 +141,27 @@ def _update_crops(frame: 'np.ndarray', detections: list, camera_id: str):
     _latest_crops[camera_id] = crops
 
 
-def _ai_inference_thread(camera_id: str, pipeline, shared_state: dict):
+def _ai_inference_thread(camera_id: str, shared_state: dict):
     """
-    Background AI thread: picks up frames from shared_state, runs inference,
-    writes results back. Uses adaptive_controller.should_run_inference() which
-    incorporates both the interval gate and the zero-motion gate (with warmup).
+    Background AI thread: lazily acquires the per-camera pipeline (which may
+    need to load the YOLO model), then picks up frames from shared_state,
+    runs inference, and writes results back.
+
+    Pipeline acquisition is intentionally INSIDE this thread so the display
+    thread is never blocked by model loading — all cameras start showing raw
+    video immediately, and AI detections appear once the model is ready.
     """
     from modules.adaptive_inference import adaptive_controller
     from modules.production_guard import (
         latency_guard, scene_profiler, threshold_calibrator,
         edge_detector,
     )
+
+    # Block HERE (not in display thread) until the pipeline is ready.
+    # The _pipelines_lock ensures only one model loads at a time.
+    print(f"[AI Thread {camera_id}] Waiting for pipeline...")
+    pipeline = get_pipeline_for_camera(camera_id)
+    print(f"[AI Thread {camera_id}] Pipeline ready.")
 
     while shared_state["running"]:
         frame = shared_state.get("ai_frame")
@@ -194,12 +220,39 @@ def _stream_worker(camera_id: str, source: str):
         latency_guard, scene_profiler, threshold_calibrator,
     )
 
-    pipeline = get_pipeline()
+    # NOTE: Pipeline is now loaded lazily inside _ai_inference_thread.
+    # The display loop starts IMMEDIATELY so all cameras show raw video
+    # from frame 1, even while the YOLO model is still loading.
 
     is_webcam = str(source) == "0"
+
+    # Resolve source path: relative paths are resolved against the project root
+    # so OpenCV can find the file regardless of CWD at startup.
+    if not is_webcam:
+        import pathlib
+        src_path = pathlib.Path(source)
+        if not src_path.is_absolute():
+            # Try relative to the project root (the directory containing this file)
+            project_root = pathlib.Path(__file__).parent.parent
+            resolved = project_root / src_path
+            if resolved.exists():
+                source = str(resolved)
+            else:
+                print(f"[Stream] ERROR: Video file not found: '{source}' (tried '{resolved}')")
+                active_streams[camera_id]["status"] = "error"
+                active_streams[camera_id]["error"] = f"File not found: {source}"
+                return
+        elif not src_path.exists():
+            print(f"[Stream] ERROR: Video file not found at absolute path: '{source}'")
+            active_streams[camera_id]["status"] = "error"
+            active_streams[camera_id]["error"] = f"File not found: {source}"
+            return
+
     cap = _cv2.VideoCapture(int(source) if is_webcam else source)
     if not cap.isOpened():
+        print(f"[Stream] ERROR: OpenCV could not open source: '{source}'")
         active_streams[camera_id]["status"] = "error"
+        active_streams[camera_id]["error"] = f"Cannot open video: {source}"
         return
 
     native_fps = cap.get(_cv2.CAP_PROP_FPS)
@@ -222,7 +275,7 @@ def _stream_worker(camera_id: str, source: str):
 
     ai_thread = threading.Thread(
         target=_ai_inference_thread,
-        args=(camera_id, pipeline, shared_state),
+        args=(camera_id, shared_state),
         daemon=True,
         name=f"AI-{camera_id}",
     )
@@ -240,7 +293,10 @@ def _stream_worker(camera_id: str, source: str):
         if not ret:
             if not is_webcam:
                 cap.set(_cv2.CAP_PROP_POS_FRAMES, 0)
+                time.sleep(0.1)
                 continue
+            print(f"[Stream] Warning: Failed to read frame from {camera_id}. Retrying...")
+            time.sleep(0.5) # Prevent tight loop on failure
             continue
 
         frame_count += 1
@@ -312,7 +368,7 @@ def _stream_worker(camera_id: str, source: str):
 
         display_latency_ms = (time.monotonic() - t0) * 1000
         scene = scene_profiler.get_profile(camera_id)
-        active_streams[camera_id]["latest_ws_payload"] = json.dumps({
+        payload = json.dumps({
             "frame": b64,
             "width": annotated.shape[1],
             "height": annotated.shape[0],
@@ -329,6 +385,9 @@ def _stream_worker(camera_id: str, source: str):
             "adaptive_conf": round(threshold_calibrator.get_threshold(camera_id), 3),
             "activity_score": round(activity, 3),
         })
+        stream_info = active_streams[camera_id]
+        stream_info["latest_ws_payload"] = payload
+        stream_info["frame_seq"] = stream_info.get("frame_seq", 0) + 1
 
         elapsed = time.monotonic() - t0
         remaining = frame_delay - elapsed
@@ -367,7 +426,9 @@ async def upload_video(file: UploadFile = File(...)):
 
 @router.post("/stream/start")
 async def start_stream(req: StreamStartRequest):
-    threading.Thread(target=get_pipeline, daemon=True).start()
+    # Pre-warm the pipeline for this camera in the background
+    camera_id_pre = req.camera_id or f"CAM_{len(active_streams) + 1:02d}"
+    threading.Thread(target=get_pipeline_for_camera, args=(camera_id_pre,), daemon=True).start()
     camera_id = req.camera_id or f"CAM_{len(active_streams) + 1:02d}"
     if camera_id in active_streams and active_streams[camera_id]["status"] == "running":
         return {"message": "Already running", "camera_id": camera_id}
@@ -390,8 +451,33 @@ async def stop_stream(camera_id: str):
 
 @router.get("/stream/list")
 async def list_streams():
-    return [StreamInfo(camera_id=c, source=i["source"], status=i["status"])
-            for c, i in active_streams.items()]
+    return [
+        {
+            "camera_id": c,
+            "source": i["source"],
+            "status": i["status"],
+            "error": i.get("error")
+        }
+        for c, i in active_streams.items()
+    ]
+
+
+@router.get("/stream/files")
+async def list_available_files():
+    """List available video files in the uploads directory."""
+    import pathlib
+    upload_dir = pathlib.Path(__file__).parent.parent / "data" / "uploads"
+    if not upload_dir.exists():
+        return {"files": []}
+    files = []
+    for f in sorted(upload_dir.iterdir()):
+        if f.suffix.lower() in {".mp4", ".avi", ".mov", ".mkv", ".m4v"}:
+            files.append({
+                "name": f.name,
+                "path": f"data/uploads/{f.name}",
+                "size_mb": round(f.stat().st_size / 1024 / 1024, 1)
+            })
+    return {"files": files}
 
 
 @router.get("/stream/person_crop/{camera_id}/{global_id}")
@@ -405,16 +491,27 @@ async def get_person_crop(camera_id: str, global_id: str):
 
 # -- WebSocket Endpoints -----------------------------------------------------
 
-@router.websocket("/ws/stream/{camera_id}")
-async def ws_stream(websocket: WebSocket, camera_id: str):
-    """Main video stream WebSocket."""
+@router.websocket("/ws/streams")
+async def ws_streams(websocket: WebSocket):
+    """Multiplexed video stream for all cameras to bypass browser connection limits."""
     await websocket.accept()
+    last_seqs = {}
     try:
         while True:
-            payload = active_streams.get(camera_id, {}).get("latest_ws_payload")
-            if payload:
-                await websocket.send_text(payload)
-            await asyncio.sleep(0.033)
+            sent_any = False
+            for camera_id, stream in list(active_streams.items()):
+                current_seq = stream.get("frame_seq", 0)
+                if current_seq != last_seqs.get(camera_id, -1):
+                    payload = stream.get("latest_ws_payload")
+                    if payload:
+                        # Fast string manipulation to inject camera_id without JSON parse overhead
+                        injected = f'{{"camera_id": "{camera_id}", ' + payload[1:]
+                        await websocket.send_text(injected)
+                        last_seqs[camera_id] = current_seq
+                        sent_any = True
+            
+            # Poll at 60Hz
+            await asyncio.sleep(0.016)
     except WebSocketDisconnect:
         pass
 

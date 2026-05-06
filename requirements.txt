@@ -1,4 +1,5 @@
 # Already have (verify versions)
+torchreid>=0.2.5              # OSNet-AIN Re-ID model (deep-person-reid)
 ultralytics>=8.0.0
 opencv-python>=4.8.0
 torch>=2.0.0
@@ -10,6 +11,7 @@ uvicorn>=0.24.0
 # face-recognition>=1.3.0       # Face recognition (requires cmake + dlib) - Commented out due to build issues
 deepface>=0.0.79              # Fallback face recognition (easier install)
 faiss-cpu>=1.7.4              # Vector similarity search
+psycopg2-binary>=2.9.9        # PostgreSQL adapter
 sqlalchemy>=2.0.0             # DB layer
 python-multipart>=0.0.6       # File upload support
 websockets>=12.0              # WebSocket support
@@ -23,3 +25,4 @@ PyYAML>=6.0.0                 # Config loading for training and edge runtime
 onnx>=1.15.0                  # ONNX export/validation
 onnxruntime>=1.17.0           # CPU inference and quantization tooling
 albumentations>=1.4.0         # Training-only blur/noise/weather augmentation support
+mediapipe>=0.10.9             # Lightweight pose estimation

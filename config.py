@@ -6,13 +6,13 @@ class OpenVisionConfig:
     # yolov8m.pt  = higher accuracy, slow on CPU
     # yolov8s_openvino_model = Intel OpenVINO accelerated yolov8s (use for Intel CPUs)
     yolo_model_path: str = "yolov8s.pt"   # Faster CPU inference
-    yolo_device: str = "cpu"               # "cpu" | "cuda" | "mps"
+    yolo_device: str = "mps"               # "cpu" | "cuda" | "mps"
     yolo_imgsz: int = 640
 
     # ── Confidence Hierarchy (primary / secondary / re-detection) ───────────
     # Primary: used for the main 640px ByteTrack pass
-    person_conf_threshold: float = 0.18
-    primary_tracker_conf_threshold: float = 0.10
+    person_conf_threshold: float = 0.50   # Raised from 0.25 to eliminate background ghost detections
+    primary_tracker_conf_threshold: float = 0.15
     object_conf_threshold: float = 0.25
     luggage_conf_threshold: float = 0.20
     vehicle_conf_threshold: float = 0.30
@@ -51,14 +51,14 @@ class OpenVisionConfig:
     # A detection must appear for N consecutive frames before it is confirmed
     temporal_confirm_frames: int = 1       # Confirm immediately to avoid missing brief detections
     # A detection holds for N frames after disappearing (prevents ID fragmentation)
-    temporal_hold_frames: int = 10         # Raised 6→10: more frames to survive occlusion
+    temporal_hold_frames: int = 5         # Reduced from 10 to 5 to stop tracker drift in empty areas
     # Smooth bbox positions over a rolling window to remove jitter
     bbox_smoothing_alpha: float = 0.45     # EMA weight for new bbox (0=freeze, 1=raw)
     bbox_snap_distance_ratio: float = 0.85  # Snap bbox when center jumps too far
 
     # ── Frame Preprocessing ───────────────────────────────────────────────────
     # CLAHE contrast enhancement — dramatically improves low-light detections
-    preprocessing_enabled: bool = True
+    preprocessing_enabled: bool = False
     clahe_clip_limit: float = 2.0
     clahe_tile_grid_size: int = 8          # NxN grid
 
@@ -72,7 +72,7 @@ class OpenVisionConfig:
 
     # ── Smart Multi-Scale Detection ─────────────────────────────────────────
     # 960px pass is now CONDITIONAL — only triggered when needed
-    multiscale_enabled: bool = True          # Enable secondary high-res pass when triggered
+    multiscale_enabled: bool = False          # Enable secondary high-res pass when triggered
     multiscale_imgsz: int = 960
     multiscale_nms_iou: float = 0.50
     tracker_nms_iou: float = 0.55
@@ -83,7 +83,7 @@ class OpenVisionConfig:
 
     # ── Small Object / Region Re-inference ────────────────────────────────────
     # Targeted high-res re-inference crop for small/distant persons
-    small_object_reinference: bool = True
+    small_object_reinference: bool = False
     small_object_area_threshold: float = 0.015  # Trigger high-res reinference for more distant people
     reinference_imgsz: int = 960                # Higher res for second pass
     reinference_max_regions: int = 8            # Check more candidate regions per frame
@@ -94,7 +94,7 @@ class OpenVisionConfig:
 
     # ── Re-Detection on Track Loss ────────────────────────────────────────────
     # When a track enters hold phase, run a targeted ROI re-detection
-    redetection_on_loss_enabled: bool = True
+    redetection_on_loss_enabled: bool = False
     redetection_roi_expand_factor: float = 1.8   # Expand bbox by this factor for ROI
     redetection_conf_threshold: float = 0.20     # Lower threshold for re-detection
     redetection_imgsz: int = 960
@@ -168,9 +168,16 @@ class OpenVisionConfig:
     dedup_iou_threshold: float = 0.65
     dedup_overlap_threshold: float = 0.78
 
-    # ── Embedding / Face Recognition ──────────────────────────────────────────
-    similarity_threshold: float = 0.82
-    embedding_model: str = "mobilenet_v2"
+    # ── Embedding / Re-ID (OSNet-AIN + multi-gallery) ────────────────────────
+    # Lowered from 0.82 to 0.72 — OSNet-AIN is more discriminative so a
+    # looser threshold handles appearance changes (bag on/off) without
+    # producing false cross-person matches.
+    similarity_threshold: float = 0.72
+    embedding_model: str = "osnet_ain_x1_0"       # updated from mobilenet_v2
+    # Gallery: max appearance snapshots stored per identity (FIFO eviction)
+    reid_max_gallery_size: int = 8
+    # Min seconds between gallery updates for the same identity
+    reid_min_update_interval_s: float = 3.0
     face_recognition_enabled: bool = False
     face_tolerance: float = 0.5
     min_face_height_px: int = 80
@@ -189,6 +196,12 @@ class OpenVisionConfig:
     # ── Alerts ────────────────────────────────────────────────────────────────
     alert_dedup_window_seconds: int = 60
 
+    # ── Session / Baggage Tracking ────────────────────────────────────────────
+    # Seconds of absence before a person is considered to have "exited" the scene
+    session_exit_timeout_s: float = 8.0
+    # Confidence threshold for laptop and electronics detection
+    laptop_conf_threshold: float = 0.35
+
     # ── Storage ───────────────────────────────────────────────────────────────
     db_path: str = "data/openvisionguard.db"
     thumbnails_dir: str = "data/thumbnails"
@@ -198,8 +211,8 @@ class OpenVisionConfig:
     frame_jpeg_quality: int = 75
     max_concurrent_cameras: int = 8
     # Adaptive display resolution (scales down when activity is low)
-    display_width_high_activity: int = 640   # px — busy scene
-    display_width_low_activity: int = 480    # px — quiet scene
+    display_width_high_activity: int = 480   # px — busy scene (lower = faster encode)
+    display_width_low_activity: int = 360    # px — quiet scene
     jpeg_quality_high_activity: int = 60
     jpeg_quality_low_activity: int = 42
     activity_high_threshold: float = 0.55   # score above this = high-activity

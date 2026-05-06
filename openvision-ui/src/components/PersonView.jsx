@@ -86,6 +86,24 @@ export default function PersonView({ globalId, cameraId = 'CAM_01', apiBase, onB
     return () => clearInterval(id);
   }, [globalId, apiBase, activeTab]);
 
+  const [fullTimeline, setFullTimeline] = useState([]);
+
+  /* ── Timeline polling (5s refresh) ── */
+  useEffect(() => {
+    const fetchTimeline = async () => {
+      try {
+        const r = await fetch(`${apiBase}/identities/${globalId}/timeline`);
+        if (r.ok) { 
+          const d = await r.json(); 
+          setFullTimeline(d.timeline || []); 
+        }
+      } catch (_) {}
+    };
+    fetchTimeline();
+    const id = setInterval(fetchTimeline, 5000);
+    return () => clearInterval(id);
+  }, [globalId, apiBase]);
+
   /* ── Movement Logs polling (3s refresh) ── */
   useEffect(() => {
     const fetchMovement = async () => {
@@ -332,7 +350,7 @@ export default function PersonView({ globalId, cameraId = 'CAM_01', apiBase, onB
 
           {/* Camera Map Timeline */}
           <Card icon={<MapPin size={12} />} title="CAMERA MAP &amp; TIMELINE" style={{ flex: 1, minHeight: 0, overflow: 'hidden' }}>
-            <CameraMapTimeline history={history} />
+            <CameraMapTimeline history={fullTimeline} />
           </Card>
         </div>
       </div>
@@ -459,14 +477,17 @@ function CameraMapTimeline({ history }) {
   // Build ordered list of unique cameras (in first-seen order)
   const seenCams = [];
   const camSet = new Set();
-  history.forEach(ev => {
-    if (ev.camera_id && !camSet.has(ev.camera_id)) {
+  
+  // history is sorted descending, so reverse to get chronological for the map
+  [...history].reverse().forEach(item => {
+    const ev = item.data;
+    if (ev && ev.camera_id && !camSet.has(ev.camera_id)) {
       camSet.add(ev.camera_id);
       seenCams.push(ev.camera_id);
     }
   });
 
-  const lastCam = history[history.length - 1]?.camera_id;
+  const lastCam = history[0]?.data?.camera_id || seenCams[seenCams.length - 1];
 
   // ── Camera node row ──
   const nodeW = 72, nodeH = 38, gap = 36;
@@ -549,8 +570,9 @@ function CameraMapTimeline({ history }) {
           {/* Vertical rail */}
           <div style={{ position: 'absolute', left: 5, top: 4, bottom: 4, width: 1, background: 'rgba(255,255,255,0.06)' }} />
 
-          {history.slice().reverse().slice(0, 60).map((ev, i) => {
-            const isActive = ev.camera_id === lastCam && i === 0;
+          {history.slice(0, 60).map((item, i) => {
+            const ev = item.data;
+            const isActive = ev?.camera_id === lastCam && i === 0;
             const dotColor = isActive ? '#22c55e' : 'var(--accent)';
             return (
               <div key={i} style={{ position: 'relative', marginBottom: 7 }}>
@@ -570,15 +592,17 @@ function CameraMapTimeline({ history }) {
                 <div style={{ background: isActive ? 'rgba(34,197,94,0.06)' : 'rgba(0,0,0,0.2)', borderRadius: 5, padding: '4px 7px', border: `1px solid ${isActive ? 'rgba(34,197,94,0.2)' : 'rgba(255,255,255,0.04)'}` }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 1 }}>
                     <span style={{ fontSize: '0.68rem', fontWeight: 600, fontFamily: 'monospace', color: isActive ? '#93c5fd' : '#60a5fa' }}>
-                      {ev.camera_id}
+                      {ev?.camera_id || 'Unknown'} <span style={{ color: 'var(--text-dim)', fontSize: '0.55rem', marginLeft: 4, textTransform: 'uppercase' }}>[{item.type}]</span>
                     </span>
                     <span style={{ fontSize: '0.6rem', color: 'var(--text-dim)' }}>
-                      {ev.timestamp ? new Date(ev.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '—'}
+                      {item.timestamp ? new Date(item.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '—'}
                     </span>
                   </div>
                   <div style={{ fontSize: '0.68rem', color: 'var(--text-main)', textTransform: 'capitalize' }}>
-                    {ev.activity || 'detected'}
-                    {ev.location ? <span style={{ color: 'var(--text-dim)' }}> · {ev.location}</span> : null}
+                    {item.type === 'movement' && `Speed: ${Math.round(ev?.speed || 0)} px/s`}
+                    {item.type === 'presence' && `${ev?.event_type || 'presence'}`}
+                    {item.type === 'event' && `${ev?.activity || 'detected'}`}
+                    {ev?.location ? <span style={{ color: 'var(--text-dim)' }}> · {ev.location}</span> : null}
                   </div>
                 </div>
               </div>

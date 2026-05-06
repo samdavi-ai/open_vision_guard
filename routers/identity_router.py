@@ -76,8 +76,20 @@ async def search_by_image(file: UploadFile = File(...)):
 @router.get("/identities/{global_id}/timeline")
 async def get_timeline(global_id: str):
     """All events for this person across cameras."""
-    history = database.get_identity_history(global_id)
-    return {"global_id": global_id, "events": history}
+    events = database.get_identity_history(global_id)
+    presence_logs = database.get_presence_logs(person_id=global_id, limit=500)
+    movement_logs = database.get_movement_logs(person_id=global_id, limit=500)
+    
+    timeline = []
+    for e in events:
+        timeline.append({"type": "event", "data": e, "timestamp": e['timestamp']})
+    for p in presence_logs:
+        timeline.append({"type": "presence", "data": p, "timestamp": p['timestamp']})
+    for m in movement_logs:
+        timeline.append({"type": "movement", "data": m, "timestamp": m['timestamp']})
+        
+    timeline.sort(key=lambda x: x['timestamp'], reverse=True)
+    return {"global_id": global_id, "timeline": timeline}
 
 
 @router.get("/identities/{global_id}/alerts")

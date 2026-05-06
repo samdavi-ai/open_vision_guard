@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Activity, ShieldAlert, Cpu, Upload, Video, Camera } from 'lucide-react';
 import VideoStream from './components/VideoStream';
 import AlertsFeed from './components/AlertsFeed';
@@ -28,6 +28,7 @@ export default function App() {
   const [sourceMode,  setSourceMode]   = useState('url');
   const [alerts,      setAlerts]       = useState([]);
   const [activePerson, setActivePerson] = useState(null); // {globalId, cameraId}
+  const [availableFiles, setAvailableFiles] = useState([]);
 
   const now          = useLiveClock();
   const alertsWsRef  = useRef(null);
@@ -50,6 +51,17 @@ export default function App() {
     return () => clearInterval(id);
   }, []);
 
+  /* ── Fetch available uploaded files ── */
+  useEffect(() => {
+    const fetchFiles = async () => {
+      try {
+        const r = await fetch(`${API_BASE}/stream/files`);
+        if (r.ok) { const d = await r.json(); setAvailableFiles(d.files || []); }
+      } catch (e) {}
+    };
+    fetchFiles();
+  }, []);
+
   /* ── Alerts WebSocket ── */
   useEffect(() => {
     const ws = new WebSocket(`${WS_BASE}/ws/alerts`);
@@ -58,6 +70,42 @@ export default function App() {
       try { setAlerts(p => [JSON.parse(e.data), ...p].slice(0, 60)); } catch (_) {}
     };
     return () => ws.close();
+  }, []);
+
+  /* ── Multiplexed Streams WebSocket ── */
+  const frameCallbacks = useRef({});
+  useEffect(() => {
+    let ws = null;
+    let reconnectTimer = null;
+    let isMounted = true;
+
+    const connectWS = () => {
+      ws = new WebSocket(`${WS_BASE}/ws/streams`);
+      ws.onmessage = (e) => {
+        try {
+          const d = JSON.parse(e.data);
+          if (d.camera_id && frameCallbacks.current[d.camera_id]) {
+            frameCallbacks.current[d.camera_id](d);
+          }
+        } catch (err) {}
+      };
+      ws.onclose = () => {
+        if (isMounted) reconnectTimer = setTimeout(connectWS, 2000);
+      };
+    };
+
+    connectWS();
+
+    return () => {
+      isMounted = false;
+      clearTimeout(reconnectTimer);
+      if (ws) ws.close();
+    };
+  }, []);
+
+  const subscribeToFrames = useCallback((cameraId, cb) => {
+    frameCallbacks.current[cameraId] = cb;
+    return () => delete frameCallbacks.current[cameraId];
   }, []);
 
   const isStreaming = activeStreams.length > 0;
@@ -171,7 +219,7 @@ export default function App() {
           {/* Video canvas (Grid) */}
           <div style={{ flex: 1, background: '#080c14', position: 'relative', minHeight: 0, overflow: 'hidden' }}>
             {isStreaming ? (
-              <VideoGrid streams={activeStreams} stopStream={stopStream} onPersonClick={handlePersonClick} />
+              <VideoGrid streams={activeStreams} stopStream={stopStream} onPersonClick={handlePersonClick} subscribeToFrames={subscribeToFrames} />
             ) : (
               <div style={S.emptyState}>
                 <div style={S.emptyIcon}><Activity size={26} style={{ opacity: 0.4 }} /></div>
@@ -182,7 +230,7 @@ export default function App() {
           </div>
 
           {/* Source controls */}
-          {activeStreams.length < 4 && (
+          {activeStreams.length < 8 && (
             <div style={{ padding: '10px 12px', borderTop: '1px solid var(--border-color)', background: 'rgba(0,0,0,0.2)', flexShrink: 0 }}>
               {/* Tabs */}
               <div style={{ display: 'flex', gap: 4, marginBottom: 8 }}>
@@ -200,15 +248,31 @@ export default function App() {
                     {t.icon} {t.label}
                   </button>
                 ))}
-                {isStreaming && <div style={{ marginLeft: 'auto', fontSize: '0.7rem', color: 'var(--text-dim)', alignSelf: 'center' }}>Max 4 concurrent cameras</div>}
+                {isStreaming && <div style={{ marginLeft: 'auto', fontSize: '0.7rem', color: 'var(--text-dim)', alignSelf: 'center' }}>Max 8 concurrent cameras</div>}
               </div>
 
               {sourceMode === 'url' && (
-                <div style={{ display: 'flex', gap: 6 }}>
-                  <input value={sourceData} onChange={e => setSourceData(e.target.value)}
-                    placeholder="Video path or RTSP URL (e.g. data/uploads/video.mp4)"
-                    style={S.input} onKeyDown={e => e.key === 'Enter' && startStream()} />
-                  <button onClick={() => startStream()} disabled={!sourceData} style={S.primaryBtn}>Start Camera</button>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                  <div style={{ display: 'flex', gap: 6 }}>
+                    <input value={sourceData} onChange={e => setSourceData(e.target.value)}
+                      placeholder="Video path or RTSP URL (e.g. data/uploads/video.mp4)"
+                      style={S.input} onKeyDown={e => e.key === 'Enter' && startStream()} />
+                    <button onClick={() => startStream()} disabled={!sourceData} style={S.primaryBtn}>Start Camera</button>
+                  </div>
+                  {availableFiles.length > 0 && (
+                    <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+                      {availableFiles.map(f => (
+                        <button key={f.path} onClick={() => startStream(f.path)} style={{
+                          ...S.tabBtn,
+                          background: 'rgba(59,130,246,0.1)',
+                          border: '1px solid rgba(59,130,246,0.3)',
+                          color: '#93c5fd', fontSize: '0.7rem',
+                        }}>
+                          ▶ {f.name} <span style={{ color: 'var(--text-dim)' }}>({f.size_mb}MB)</span>
+                        </button>
+                      ))}
+                    </div>
+                  )}
                 </div>
               )}
               {sourceMode === 'upload' && (
@@ -255,7 +319,7 @@ export default function App() {
 }
 
 /* ─── Multi-Camera Helper Components ─── */
-function VideoGrid({ streams, stopStream, onPersonClick }) {
+function VideoGrid({ streams, stopStream, onPersonClick, subscribeToFrames }) {
   const count = streams.length;
   const cols = count === 1 ? '1fr' : '1fr 1fr';
   const rows = count <= 2 ? '1fr' : '1fr 1fr';
@@ -263,14 +327,16 @@ function VideoGrid({ streams, stopStream, onPersonClick }) {
   return (
     <div style={{ display: 'grid', gridTemplateColumns: cols, gridTemplateRows: rows, gap: 2, width: '100%', height: '100%' }}>
       {streams.map(stream => (
-        <VideoSlot key={stream.camera_id} stream={stream} stopStream={stopStream} onPersonClick={onPersonClick} />
+        <VideoSlot key={stream.camera_id} stream={stream} stopStream={stopStream} onPersonClick={onPersonClick} subscribeToFrames={subscribeToFrames} />
       ))}
     </div>
   );
 }
 
-function VideoSlot({ stream, stopStream, onPersonClick }) {
+function VideoSlot({ stream, stopStream, onPersonClick, subscribeToFrames }) {
   const [fps, setFps] = useState(0);
+
+  const isError = stream.status === 'error';
 
   return (
     <div style={{ position: 'relative', width: '100%', height: '100%', overflow: 'hidden', background: '#000' }}>
@@ -281,10 +347,10 @@ function VideoSlot({ stream, stopStream, onPersonClick }) {
         display: 'flex', justifyContent: 'space-between', alignItems: 'center', pointerEvents: 'none'
       }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: '0.68rem', fontWeight: 600, color: '#fff', fontFamily: 'monospace' }}>
-          <div style={{ width: 6, height: 6, borderRadius: '50%', background: 'var(--low)', animation: 'pulse 2s infinite' }} />
+          <div style={{ width: 6, height: 6, borderRadius: '50%', background: isError ? '#ef4444' : 'var(--low)', animation: isError ? 'none' : 'pulse 2s infinite' }} />
           {stream.camera_id}
           <span style={{ color: 'var(--text-dim)', fontWeight: 400 }}>|</span>
-          <span style={{ color: 'var(--accent)' }}>{fps} FPS</span>
+          <span style={{ color: isError ? '#ef4444' : 'var(--accent)' }}>{isError ? 'ERROR' : `${fps} FPS`}</span>
         </div>
         <button
           onClick={() => stopStream(stream.camera_id)}
@@ -294,11 +360,26 @@ function VideoSlot({ stream, stopStream, onPersonClick }) {
         </button>
       </div>
 
-      <VideoStream
-        wsUrl={`${WS_BASE}/ws/stream/${stream.camera_id}`}
-        setFps={setFps}
-        onPersonClick={(gid) => onPersonClick(gid, stream.camera_id)}
-      />
+      {isError ? (
+        <div style={{
+          display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+          height: '100%', gap: 10, padding: 20, textAlign: 'center',
+        }}>
+          <div style={{ fontSize: '2rem' }}>⚠️</div>
+          <div style={{ color: '#ef4444', fontWeight: 700, fontSize: '0.85rem' }}>Stream Failed</div>
+          <div style={{ color: 'var(--text-dim)', fontSize: '0.72rem', maxWidth: 260, wordBreak: 'break-all' }}>
+            {stream.error || 'Could not open video source. Check the file path.'}
+          </div>
+          <div style={{ color: '#60a5fa', fontSize: '0.68rem', fontFamily: 'monospace' }}>{stream.source}</div>
+        </div>
+      ) : (
+        <VideoStream
+          streamId={stream.camera_id}
+          subscribeToFrames={subscribeToFrames}
+          setFps={setFps}
+          onPersonClick={(gid) => onPersonClick(gid, stream.camera_id)}
+        />
+      )}
     </div>
   );
 }

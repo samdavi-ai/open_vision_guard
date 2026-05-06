@@ -22,6 +22,13 @@ from dataclasses import dataclass, field
 from typing import Any, Deque, Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
+from typing import Dict, Any, List, Tuple
+import threading
+
+# Global lock to serialize PyTorch MPS GPU calls. Apple Silicon (MPS)
+# will hard-deadlock if multiple threads run YOLO inference concurrently.
+_inference_lock = threading.Lock()
+
 from ultralytics import YOLO
 
 from config import config
@@ -32,6 +39,12 @@ from modules.geolocation import geolocation_engine
 from modules.luggage_tracker import luggage_tracker
 from modules.presence_tracker import presence_tracker
 from modules.risk_engine import risk_engine
+from modules.embedding_engine import embedding_engine
+from modules.pose_analyzer import pose_analyzer
+from modules.behaviour_analyzer import behaviour_analyzer
+from modules.session_tracker import session_tracker, BaggageEvent
+import queue
+import threading
 
 BBox = Tuple[int, int, int, int]
 
@@ -469,7 +482,13 @@ class Pipeline:
         "other": {9, 10, 11, 12, 58, 61, 73, 74, 75, 76, 77, 78, 79},
     }
     VEHICLE_CLASSES = {1, 2, 3, 4, 5, 6, 7, 8}
-    LUGGAGE_CLASSES = {24: "backpack", 26: "handbag", 28: "suitcase"}
+    LUGGAGE_CLASSES = {
+        24: "backpack",
+        26: "handbag",
+        28: "suitcase",
+        63: "laptop",       # Phase 5 — critical for baggage-swap detection
+        67: "cell phone",   # Phase 5 — track phones as carried items
+    }
 
     # Confidence thresholds are now read from config.py so they can be
     # adjusted without touching pipeline code.
@@ -506,6 +525,12 @@ class Pipeline:
         )
         # DB write throttle: last flush time per identity (avoids write flood)
         self._db_last_flush: Dict[str, float] = {}
+
+        # ── Optimization: Async AI Worker ──
+        self.ai_queue = queue.Queue(maxsize=50)
+        self.heavy_ai_results: Dict[str, Dict[str, Any]] = {}  # global_id -> {embedding, behaviour, last_update}
+        self.worker_thread = threading.Thread(target=self._ai_worker_loop, daemon=True, name="AsyncAIWorker")
+        self.worker_thread.start()
         database.init_db()
         print("[Pipeline] Ready.")
 
@@ -544,16 +569,17 @@ class Pipeline:
         )
 
         # Primary pass at config resolution (640px) with ByteTrack
-        yolo = self.yolo_model.track(
-            inference_frame,
-            persist=True,
-            verbose=False,
-            imgsz=config.yolo_imgsz,
-            conf=dynamic_tracker_conf,
-            iou=config.tracker_nms_iou,
-            device=self.device,
-            tracker="bytetrack.yaml",
-        )[0]
+        with _inference_lock:
+            yolo = self.yolo_model.track(
+                inference_frame,
+                persist=True,
+                verbose=False,
+                imgsz=config.yolo_imgsz,
+                conf=dynamic_tracker_conf,
+                iou=config.tracker_nms_iou,
+                device=self.device,
+                tracker="bytetrack.yaml",
+            )[0]
 
         person_candidates, object_detections = self._parse_yolo_result(yolo, frame.shape[:2], camera_id, now)
 
@@ -561,7 +587,8 @@ class Pipeline:
         if (config.multiscale_enabled
                 and latency_guard.multiscale_allowed
                 and self._should_trigger_multiscale(person_candidates, frame.shape[:2])):
-            extra_ms = self._multiscale_detect(inference_frame, frame.shape[:2], camera_id, now)
+            with _inference_lock:
+                extra_ms = self._multiscale_detect(inference_frame, frame.shape[:2], camera_id, now)
             if extra_ms:
                 person_candidates.extend(extra_ms)
 
@@ -569,9 +596,10 @@ class Pipeline:
         if (config.small_object_reinference
                 and latency_guard.reinference_allowed
                 and person_candidates):
-            extra_roi = self._small_object_reinference(
-                inference_frame, person_candidates, frame.shape[:2], camera_id, now
-            )
+            with _inference_lock:
+                extra_roi = self._small_object_reinference(
+                    inference_frame, person_candidates, frame.shape[:2], camera_id, now
+                )
             if extra_roi:
                 person_candidates.extend(extra_roi)
 
@@ -586,7 +614,8 @@ class Pipeline:
 
         # ── Re-Detection on Track Loss (gated by latency guard) ──────────────
         if config.redetection_on_loss_enabled and latency_guard.redetection_allowed:
-            recovered = self._redetect_lost_tracks(inference_frame, people_raw, frame.shape[:2], camera_id, now)
+            with _inference_lock:
+                recovered = self._redetect_lost_tracks(inference_frame, people_raw, frame.shape[:2], camera_id, now)
             if recovered:
                 updated = self._temporal_buffer.update(recovered)
                 existing_ids = {p["global_id"] for p in people}
@@ -625,7 +654,15 @@ class Pipeline:
         luggage_events = self._update_luggage(object_detections, person_positions, now, camera_id, frame)
         alerts.extend(luggage_events)
 
+        # ── Session Tracker: entry/exit baggage-change detection ────────────
+        baggage_alerts = self._update_sessions(people, object_links, camera_id, now, frame)
+        alerts.extend(baggage_alerts)
+
         self._update_presence(person_ids, now, camera_id)
+        
+        # ── Smart Skip: Queue heavy AI tasks asynchronously ──
+        self._queue_heavy_tasks(people, frame, now)
+        
         self._cleanup(now)
 
         return PipelineResult(
@@ -634,6 +671,69 @@ class Pipeline:
             alerts=[a for a in alerts if a],
             current_detections=detections,
         )
+
+    def _queue_heavy_tasks(self, people: List[Dict[str, Any]], frame: np.ndarray, now: float):
+        """Identifies people needing a heavy AI update and queues them asynchronously."""
+        skip_interval = 5  # Run heavy AI every 5 frames per person
+        
+        for person in people:
+            gid = person["global_id"]
+            res = self.heavy_ai_results.get(gid, {"last_frame": 0})
+            
+            # Smart Skip Check
+            res["last_frame"] = res.get("last_frame", 0) + 1
+            if res["last_frame"] % skip_interval == 0:
+                # Crop and queue
+                x1, y1, x2, y2 = person["bbox"]
+                x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
+                crop = frame[y1:y2, x1:x2]
+                if crop.size > 0:
+                    try:
+                        self.ai_queue.put_nowait({
+                            "global_id": gid,
+                            "crop": crop.copy(),
+                            "camera_id": person.get("camera_id", "CAM_01")
+                        })
+                    except queue.Full:
+                        pass # Drop task if queue is backed up
+
+    def _ai_worker_loop(self):
+        """Background thread that processes heavy Re-ID and Behaviour tasks."""
+        print("[Pipeline] AsyncAIWorker started.")
+        while True:
+            try:
+                task = self.ai_queue.get(timeout=1.0)
+                gid = task["global_id"]
+                crop = task["crop"]
+                
+                # 1. Run Re-ID (OSNet)
+                # Note: get_or_create_identity normally handles this, but here we just update
+                embedding = embedding_engine.generate_embedding(crop)
+                
+                # 2. Run Behaviour (3D CNN)
+                # We need a buffer for 3D CNN, so we just feed the crop here
+                # For simplicity in this async worker, we'll assume the engine handles state
+                behaviour_info = behaviour_analyzer.analyze_person(gid, crop)
+                
+                # Update shared results
+                self.heavy_ai_results[gid] = {
+                    "embedding": embedding,
+                    "behaviour": behaviour_info,
+                    "last_update": time.time()
+                }
+                
+                # Update database asynchronously
+                database.save_event({
+                    "global_id": gid,
+                    "activity": behaviour_info.get("action", "unknown"),
+                    "timestamp": datetime.datetime.now().astimezone().isoformat()
+                })
+                
+                self.ai_queue.task_done()
+            except queue.Empty:
+                continue
+            except Exception as e:
+                print(f"[AsyncAIWorker Error] {e}")
 
     def _parse_yolo_result(
         self,
@@ -702,11 +802,16 @@ class Pipeline:
                 })
                 continue
 
-            # ── Fix 4: Per-class threshold for vehicles vs objects vs luggage ─
+            # ── Per-class confidence threshold ────────────────────────────────
             if cls_id in self.VEHICLE_CLASSES:
                 threshold = config.vehicle_conf_threshold
             elif cls_id in self.LUGGAGE_CLASSES:
-                threshold = config.luggage_conf_threshold
+                # Laptop and phones are often partially occluded — use the
+                # dedicated lower threshold so we don't miss them.
+                if cls_id in {63, 67}:
+                    threshold = getattr(config, "laptop_conf_threshold", 0.35)
+                else:
+                    threshold = config.luggage_conf_threshold
             else:
                 threshold = config.object_conf_threshold
 
@@ -1213,7 +1318,17 @@ class Pipeline:
         state.movement_direction = movement_direction
         state.samples.append((cx, cy, now, height))
 
-        behaviour_label, behaviour_score, behaviour_alert = self._classify_behavior(state)
+        # ── Integration of Async AI Results ─────────────────────────────
+        heavy_res = self.heavy_ai_results.get(global_id, {})
+        async_behaviour = heavy_res.get("behaviour", {})
+        
+        # Merge async behaviour if available, otherwise use legacy classifier
+        if async_behaviour:
+            behaviour_label = async_behaviour.get("action", "stationary")
+            behaviour_score = async_behaviour.get("confidence", 0.5)
+            behaviour_alert = async_behaviour.get("alert", None)
+        else:
+            behaviour_label, behaviour_score, behaviour_alert = self._classify_behavior(state)
 
         signals = {
             "loitering": behaviour_label == "loitering",
@@ -1460,6 +1575,42 @@ class Pipeline:
         for event in result.get("events", []):
             owner = event.get("owner_id") or event.get("new_holder") or "Unknown"
             alert = alert_engine.create_alert(event["type"], owner, camera_id, event, frame)
+            if alert:
+                alerts.append(alert)
+        return alerts
+
+    def _update_sessions(
+        self,
+        people: List[Dict[str, Any]],
+        object_links: Dict[str, Dict[str, Any]],
+        camera_id: str,
+        now: float,
+        frame: np.ndarray,
+    ) -> List[Dict[str, Any]]:
+        """
+        Feed the SessionTracker each frame and collect any baggage-change alerts.
+
+        1. For every visible person, call session_tracker.on_person_seen with
+           the set of LUGGAGE_CLASS items currently linked to them.
+        2. Call session_tracker.check_exits to detect identities that left the
+           scene and compare their entry vs exit items.
+        3. Convert BaggageEvents → alert dicts via alert_engine.create_baggage_alert.
+        """
+        # 1. Notify tracker of currently visible people + their items
+        active_ids: set = set()
+        for person in people:
+            gid = person["global_id"]
+            active_ids.add(gid)
+            carried: set = set(object_links.get(gid, {}).get("carried_objects", []))
+            session_tracker.on_person_seen(gid, carried, camera_id, now)
+
+        # 2. Check for exits (returns BaggageEvent list)
+        baggage_events = session_tracker.check_exits(active_ids, camera_id, now)
+
+        # 3. Convert to alert dicts
+        alerts: List[Dict[str, Any]] = []
+        for event in baggage_events:
+            alert = alert_engine.create_baggage_alert(event, frame)
             if alert:
                 alerts.append(alert)
         return alerts

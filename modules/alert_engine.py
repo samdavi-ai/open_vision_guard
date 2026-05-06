@@ -100,6 +100,10 @@ class AlertEngine:
             "camera_avoidance": "medium",
             "high_risk": "critical",
             "following": "high",
+            # ── Baggage-change alerts (from session_tracker) ──
+            "baggage_left_behind": "high",
+            "baggage_taken": "critical",
+            "baggage_swap": "critical",
         }
         return severity_map.get(alert_type, "medium")
 
@@ -164,6 +168,25 @@ class AlertEngine:
             target = details.get("target_id", "unknown") if isinstance(details, dict) else "unknown"
             return f"⚠ FOLLOWING: {base} — Appears to be following {target}"
 
+        elif alert_type == "baggage_left_behind":
+            removed = details.get("items_removed", []) if isinstance(details, dict) else []
+            items_str = ", ".join(removed) if removed else "item"
+            return f"🚨 ITEM LEFT BEHIND: {base} — Entered with {items_str}, exited without it"
+
+        elif alert_type == "baggage_taken":
+            added = details.get("items_added", []) if isinstance(details, dict) else []
+            items_str = ", ".join(added) if added else "item"
+            return f"🚨 ITEM TAKEN: {base} — Exited with {items_str} (not carried on entry)"
+
+        elif alert_type == "baggage_swap":
+            removed = details.get("items_removed", []) if isinstance(details, dict) else []
+            added   = details.get("items_added", [])   if isinstance(details, dict) else []
+            return (
+                f"🔴 BAGGAGE SWAP: {base} — "
+                f"Left: {', '.join(removed) or 'nothing'} · "
+                f"Took: {', '.join(added) or 'nothing'}"
+            )
+
         return f"ALERT: {base} — {alert_type}"
 
     def _push_to_subscribers(self, alert: Dict[str, Any]):
@@ -174,6 +197,38 @@ class AlertEngine:
                 callback(alert)
             except Exception:
                 pass
+
+    def create_baggage_alert(
+        self,
+        event,           # BaggageEvent dataclass from session_tracker
+        frame=None,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Convenience wrapper: converts a BaggageEvent into an alert dict and
+        persists it via create_alert, including session-specific fields.
+        """
+        details = {
+            "items_removed":   event.items_removed,
+            "items_added":     event.items_added,
+            "entry_time":      event.entry_time_iso,
+            "exit_time":       event.exit_time_iso,
+            "session_index":   event.session_index,
+        }
+        alert = self.create_alert(
+            alert_type=event.event_type,
+            global_id=event.global_id,
+            camera_id=event.camera_id,
+            details=details,
+            frame=frame,
+        )
+        if alert:
+            # Enrich with structured fields for frontend BaggageAlert card
+            alert["items_removed"]  = event.items_removed
+            alert["items_added"]    = event.items_added
+            alert["entry_time"]     = event.entry_time_iso
+            alert["exit_time"]      = event.exit_time_iso
+            alert["session_index"]  = event.session_index
+        return alert
 
 
 # Singleton
