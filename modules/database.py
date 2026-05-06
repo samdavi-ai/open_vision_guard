@@ -123,6 +123,18 @@ def init_db():
                 match_status VARCHAR DEFAULT 'unknown'
             );
             ''')
+            # ── Schema migrations (add columns that may not exist in older DBs) ─
+            # PostgreSQL: CREATE TABLE IF NOT EXISTS won't add new columns to
+            # existing tables, so we must explicitly ALTER them.
+            migration_stmts = [
+                "ALTER TABLE alerts ADD COLUMN IF NOT EXISTS metadata_json TEXT;",
+                "ALTER TABLE identities ADD COLUMN IF NOT EXISTS metadata_json TEXT;",
+            ]
+            for stmt in migration_stmts:
+                try:
+                    cursor.execute(stmt)
+                except Exception as me:
+                    print(f"[DB Migration] Warning: {me}")
             conn.commit()
     finally:
         db_pool.putconn(conn)

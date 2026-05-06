@@ -1,17 +1,18 @@
 # AI Models
 *.pt
 *.pkl
+*.onnx
+*_openvino_model/
 
 # Videos & Results
 *.mp4
 *.avi
 *.mov
 *.mkv
+*.webm
 test_results/
 outputs/
-test2vid.mp4
-test4video.mp4
-vid3test.mp4
+input data/
 
 # Python
 __pycache__/
@@ -28,19 +29,20 @@ ENV/
 # Generated data (large, not needed in git)
 data/thumbnails/
 data/uploads/
+data/face_crops/
 backend/uploads/
 
-# Frontend build artifacts
+# Node / Frontend
 openvision-ui/node_modules/
 openvision-ui/dist/
 openvision-ui/.vite/
 node-*.tar.gz
-node-*/
+node-v*/
 
 # IDE / OS
 .vscode/
 .idea/
 .DS_Store
 Thumbs.db
+*.log
 
-data/face_crops/

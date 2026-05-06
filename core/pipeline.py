@@ -382,15 +382,32 @@ class TrackIdentityStore:
         self._next_id += 1
         return global_id
 
-    def resolve(self, camera_id: str, track_id: int, now: float) -> str:
+    def resolve(self, camera_id: str, track_id: int, now: float, crop: Optional[np.ndarray] = None) -> str:
         key = (camera_id, int(track_id))
-        if key not in self._track_to_identity:
-            self._track_to_identity[key] = self._new_identity()
-        global_id = self._track_to_identity[key]
+        
+        # If we already have a mapping for this tracker ID, reuse it
+        if key in self._track_to_identity:
+            gid = self._track_to_identity[key]
+            self._identity_last_seen[gid] = now
+            return gid
+
+        # NEW TRACK: Perform Re-ID to link local track to a Global ID
+        if crop is not None and crop.size > 0:
+            global_id = embedding_engine.get_or_create_identity(crop)
+        else:
+            # Fallback if no crop available (rare)
+            global_id = f"Person_TEMP_{int(now)}"
+            
+        self._track_to_identity[key] = global_id
         self._identity_last_seen[global_id] = now
         return global_id
 
-    def resolve_by_box(self, camera_id: str, bbox: BBox, now: float) -> str:
+    def resolve_by_box(self, camera_id: str, bbox: BBox, now: float, crop: Optional[np.ndarray] = None) -> str:
+        """Fallback for boxes without a track_id (uses spatial proximity + Re-ID)."""
+        if crop is not None and crop.size > 0:
+            return embedding_engine.get_or_create_identity(crop)
+
+        # Spatial-only fallback (if crop failed)
         best_key = None
         best_score = 0.0
         cx, cy = self._center(bbox)
@@ -410,7 +427,8 @@ class TrackIdentityStore:
         if best_key is not None and best_score >= 0.25:
             global_id = best_key[1]
         else:
-            global_id = self._new_identity()
+            # Last resort — create new (though usually we should have a crop)
+            global_id = f"Person_BOX_{int(now)}"
             best_key = (camera_id, global_id)
 
         self._fallback_tracks[best_key] = {"bbox": bbox, "last_seen": now}
@@ -581,7 +599,7 @@ class Pipeline:
                 tracker="bytetrack.yaml",
             )[0]
 
-        person_candidates, object_detections = self._parse_yolo_result(yolo, frame.shape[:2], camera_id, now)
+        person_candidates, object_detections = self._parse_yolo_result(yolo, frame, camera_id, now)
 
         # ── Smart Multi-Scale (gated by latency guard) ───────────────────────
         if (config.multiscale_enabled
@@ -738,7 +756,7 @@ class Pipeline:
     def _parse_yolo_result(
         self,
         result: Any,
-        frame_shape: Tuple[int, int],
+        frame: np.ndarray,
         camera_id: str,
         now: float,
     ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
@@ -758,7 +776,7 @@ class Pipeline:
 
         people: List[Dict[str, Any]] = []
         objects: List[Dict[str, Any]] = []
-        h, w = frame_shape
+        h, w = frame.shape[:2]
         scene = scene_profiler.get_profile(camera_id)
         dynamic_person_base = threshold_calibrator.get_threshold(camera_id)
 
@@ -787,12 +805,19 @@ class Pipeline:
 
                 if conf < person_threshold:
                     continue
-                if not self._valid_person_box((x1, y1, x2, y2), frame_shape):
+                if not self._valid_person_box((x1, y1, x2, y2), frame.shape[:2]):
                     continue
+                # ── Robust Re-ID Identity Resolution ────────────────────────
+                # Extract crop for Re-ID engine
+                p_crop = None
+                if (track_id is None) or ((camera_id, int(track_id)) not in self.identity_store._track_to_identity):
+                    # Only crop if it's a new identity or untracked box
+                    p_crop = frame[y1:y2, x1:x2] if y2 > y1 and x2 > x1 else None
+
                 global_id = (
-                    self.identity_store.resolve(camera_id, int(track_id), now)
+                    self.identity_store.resolve(camera_id, int(track_id), now, p_crop)
                     if track_id is not None
-                    else self.identity_store.resolve_by_box(camera_id, (x1, y1, x2, y2), now)
+                    else self.identity_store.resolve_by_box(camera_id, (x1, y1, x2, y2), now, p_crop)
                 )
                 people.append({
                     "bbox": (x1, y1, x2, y2),
@@ -823,7 +848,7 @@ class Pipeline:
                 )
 
             if cls_id in self.COCO_NAMES and conf >= threshold:
-                if not self._valid_object_box((x1, y1, x2, y2), frame_shape):
+                if not self._valid_object_box((x1, y1, x2, y2), frame.shape[:2]):
                     continue
                 objects.append({
                     "bbox": (x1, y1, x2, y2),

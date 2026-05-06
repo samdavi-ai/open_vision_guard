@@ -27,6 +27,13 @@ active_streams: Dict[str, Dict[str, Any]] = {}
 _camera_pipelines: Dict[str, Pipeline] = {}
 _pipelines_lock = threading.Lock()
 
+# Per-camera AdaptiveInferenceController instances.
+# CRITICAL: The module-level singleton from adaptive_inference.py is shared
+# across all threads. If Camera A has low activity it would gate Camera B's
+# inference too. Each camera needs its own independent controller.
+_camera_controllers: Dict[str, Any] = {}
+_controllers_lock = threading.Lock()
+
 # camera_id → {frame, timestamp}
 _latest_raw_frames: Dict[str, Any] = {}
 
@@ -63,6 +70,18 @@ def get_pipeline_for_camera(camera_id: str) -> Pipeline:
                 print(f"[Stream] Creating dedicated Pipeline for {camera_id}")
                 _camera_pipelines[camera_id] = Pipeline()
     return _camera_pipelines[camera_id]
+
+
+def get_controller_for_camera(camera_id: str):
+    """Returns a dedicated AdaptiveInferenceController for the given camera.
+    Isolates activity scoring so one camera's static scene doesn't gate others."""
+    if camera_id not in _camera_controllers:
+        with _controllers_lock:
+            if camera_id not in _camera_controllers:
+                from modules.adaptive_inference import AdaptiveInferenceController
+                print(f"[Stream] Creating dedicated AdaptiveInferenceController for {camera_id}")
+                _camera_controllers[camera_id] = AdaptiveInferenceController()
+    return _camera_controllers[camera_id]
 
 
 # Keep backward-compat alias used by orchestrator health check
@@ -151,11 +170,14 @@ def _ai_inference_thread(camera_id: str, shared_state: dict):
     thread is never blocked by model loading — all cameras start showing raw
     video immediately, and AI detections appear once the model is ready.
     """
-    from modules.adaptive_inference import adaptive_controller
     from modules.production_guard import (
         latency_guard, scene_profiler, threshold_calibrator,
         edge_detector,
     )
+
+    # Per-camera isolated controller — prevents one camera's low-activity from
+    # gating inference on all other cameras (the original shared-singleton bug).
+    adaptive_controller = get_controller_for_camera(camera_id)
 
     # Block HERE (not in display thread) until the pipeline is ready.
     # The _pipelines_lock ensures only one model loads at a time.
@@ -198,7 +220,9 @@ def _ai_inference_thread(camera_id: str, shared_state: dict):
             latency_guard.record(ai_latency)
 
         except Exception as e:
-            print(f"[AI Thread error] {e}")
+            import traceback
+            print(f"[AI Thread error] {camera_id}: {e}")
+            traceback.print_exc()
 
     shared_state["ai_done"] = True
 
@@ -262,7 +286,11 @@ def _stream_worker(camera_id: str, source: str):
 
     active_streams[camera_id]["status"] = "running"
 
-    memory = DetectionMemory(ttl_frames=12, interpolate=True, video_fps=native_fps)
+    # TTL = 20 frames (0.8s at 25fps).
+    # With multiscale/reinference DISABLED: per-camera AI ≈ 100ms.
+    # 4-camera cycle = 4 × 100ms = 400ms → 20 frames (0.8s) safely bridges the gap.
+    # Velocity interpolation keeps boxes tracking smoothly between AI pulses.
+    memory = DetectionMemory(ttl_frames=20, interpolate=True, video_fps=native_fps)
 
     shared_state = {
         "running": True,
@@ -287,112 +315,155 @@ def _stream_worker(camera_id: str, source: str):
     _cached_location = geolocation_engine.get_current_location()  # cache once
     _loc_refresh_counter = 0
 
+    class _NumpySafeEncoder(json.JSONEncoder):
+        """Converts numpy scalars/arrays to native Python types for JSON serialization."""
+        def default(self, obj):
+            import numpy as _np
+            if isinstance(obj, _np.integer): return int(obj)
+            if isinstance(obj, _np.floating): return float(obj)
+            if isinstance(obj, _np.ndarray): return obj.tolist()
+            return super().default(obj)
+
     while active_streams.get(camera_id, {}).get("status") == "running":
         t0 = time.monotonic()
-        ret, frame = cap.read()
-        if not ret:
-            if not is_webcam:
-                cap.set(_cv2.CAP_PROP_POS_FRAMES, 0)
-                time.sleep(0.1)
+        try:
+            ret, frame = cap.read()
+            if not ret:
+                if not is_webcam:
+                    # VIDEO LOOP: clear all stale detections so old boxes don't
+                    # appear on the black/seeking frames during the reset seek.
+                    memory._store.clear()
+                    detections = []
+                    shared_state["detections"] = []
+                    shared_state["alerts"] = []
+                    active_streams[camera_id]["latest_detections"] = []
+                    cap.set(_cv2.CAP_PROP_POS_FRAMES, 0)
+                    time.sleep(0.15)
+                    continue
+                print(f"[Stream] Warning: Failed to read frame from {camera_id}. Retrying...")
+                time.sleep(0.5)
                 continue
-            print(f"[Stream] Warning: Failed to read frame from {camera_id}. Retrying...")
-            time.sleep(0.5) # Prevent tight loop on failure
-            continue
 
-        frame_count += 1
-        _latest_raw_frames[camera_id] = {"frame": frame, "timestamp": time.time()}
+            frame_count += 1
+            if frame_count % 100 == 0:
+                print(f"[Stream {camera_id}] Encoding frame {frame_count} (Activity: {adaptive_controller.activity_score:.2f})")
+            _latest_raw_frames[camera_id] = {"frame": frame, "timestamp": time.time()}
 
-        # Feed AI thread the latest frame (overwrite — we only care about newest)
-        shared_state["ai_frame"] = frame  # no copy; AI thread reads only
+            # Feed AI thread the latest frame (overwrite — we only care about newest)
+            shared_state["ai_frame"] = frame  # no copy; AI thread reads only
 
-        # Consume new AI detections if available
-        ai_detections = shared_state["detections"]
-        if ai_detections:
-            memory.update(ai_detections)
-            detections = ai_detections
-            active_streams[camera_id]["latest_alerts"] = shared_state["alerts"]
-            shared_state["detections"] = []
-            shared_state["alerts"] = []
-        else:
-            memory.tick()
-            detections = memory.get_active()
+            # Consume new AI detections if available
+            ai_detections = shared_state["detections"]
+            if ai_detections:
+                memory.update(ai_detections)
+                detections = ai_detections
+                active_streams[camera_id]["latest_alerts"] = shared_state["alerts"]
+                shared_state["detections"] = []
+                shared_state["alerts"] = []
+            else:
+                memory.tick()
+                detections = memory.get_active()
 
-        active_streams[camera_id]["latest_detections"] = detections
+            active_streams[camera_id]["latest_detections"] = detections
 
-        # Smart crop update: only rebuild when the tracked identity set changes
-        if frame_count % config.crop_update_interval == 0:
-            current_ids = frozenset(
-                d["global_id"] for d in detections if not d.get("is_object", False)
+            # Smart crop update: only rebuild when the tracked identity set changes
+            if frame_count % config.crop_update_interval == 0:
+                current_ids = frozenset(
+                    d["global_id"] for d in detections if not d.get("is_object", False)
+                )
+                if current_ids != _last_crop_ids:
+                    _update_crops(frame, detections, camera_id)
+                    _last_crop_ids = current_ids
+
+            # --- Adaptive display pipeline: downscale → draw → encode ---------
+            h_orig, w_orig = frame.shape[:2]
+            activity = adaptive_controller.activity_score
+            high_activity = activity >= config.activity_high_threshold
+            display_w = (
+                config.display_width_high_activity if high_activity
+                else config.display_width_low_activity
             )
-            if current_ids != _last_crop_ids:
-                _update_crops(frame, detections, camera_id)
-                _last_crop_ids = current_ids
-
-        # --- Adaptive display pipeline: downscale → draw → encode -------------
-        h_orig, w_orig = frame.shape[:2]
-        activity = adaptive_controller.activity_score
-        high_activity = activity >= config.activity_high_threshold
-        display_w = (
-            config.display_width_high_activity if high_activity
-            else config.display_width_low_activity
-        )
-        jpeg_q = (
-            config.jpeg_quality_high_activity if high_activity
-            else config.jpeg_quality_low_activity
-        )
-
-        if w_orig > display_w:
-            scale = display_w / w_orig
-            display_frame = _cv2.resize(
-                frame, (display_w, int(h_orig * scale)),
-                interpolation=_cv2.INTER_NEAREST,
+            jpeg_q = (
+                config.jpeg_quality_high_activity if high_activity
+                else config.jpeg_quality_low_activity
             )
-            scaled_dets = []
-            for det in detections:
-                sd = dict(det)
-                x1, y1, x2, y2 = det["bbox"]
-                sd["bbox"] = [int(x1*scale), int(y1*scale), int(x2*scale), int(y2*scale)]
-                scaled_dets.append(sd)
-            annotated = _draw_detections(display_frame, scaled_dets)
-        else:
-            annotated = _draw_detections(frame, detections)
 
-        _, jpeg_buf = _cv2.imencode('.jpg', annotated, [_cv2.IMWRITE_JPEG_QUALITY, jpeg_q])
-        b64 = base64.b64encode(jpeg_buf.tobytes()).decode('utf-8')
+            if w_orig > display_w:
+                scale = display_w / w_orig
+                display_frame = _cv2.resize(
+                    frame, (display_w, int(h_orig * scale)),
+                    interpolation=_cv2.INTER_NEAREST,
+                )
+                scaled_dets = []
+                for det in detections:
+                    sd = dict(det)
+                    x1, y1, x2, y2 = det["bbox"]
+                    sd["bbox"] = [int(x1*scale), int(y1*scale), int(x2*scale), int(y2*scale)]
+                    scaled_dets.append(sd)
+                draw_target = display_frame
+                draw_dets = scaled_dets
+            else:
+                draw_target = frame
+                draw_dets = detections
 
-        # Refresh geolocation only every 150 frames (~6 seconds at 25 FPS)
-        _loc_refresh_counter += 1
-        if _loc_refresh_counter >= 150:
-            _cached_location = geolocation_engine.get_current_location()
-            _loc_refresh_counter = 0
+            # Safe annotation — if draw fails, just use raw frame
+            try:
+                annotated = _draw_detections(draw_target, draw_dets)
+            except Exception as draw_err:
+                print(f"[Stream {camera_id}] Draw error: {draw_err}")
+                annotated = draw_target
 
-        display_latency_ms = (time.monotonic() - t0) * 1000
-        scene = scene_profiler.get_profile(camera_id)
-        payload = json.dumps({
-            "frame": b64,
-            "width": annotated.shape[1],
-            "height": annotated.shape[0],
-            "detections": detections,
-            "fps": int(1.0 / max(0.001, time.monotonic() - t0)),
-            "timestamp": datetime.datetime.now().astimezone().isoformat(),
-            "latitude": _cached_location["latitude"],
-            "longitude": _cached_location["longitude"],
-            "latency_ms": round(display_latency_ms, 1),
-            "ai_latency_ms": round(shared_state["ai_latency_ms"], 1),
-            "latency_status": latency_guard.status,
-            "scene_brightness": round(scene.avg_brightness, 1),
-            "scene_density": round(scene.avg_density, 1),
-            "adaptive_conf": round(threshold_calibrator.get_threshold(camera_id), 3),
-            "activity_score": round(activity, 3),
-        })
-        stream_info = active_streams[camera_id]
-        stream_info["latest_ws_payload"] = payload
-        stream_info["frame_seq"] = stream_info.get("frame_seq", 0) + 1
+            # Encode — always send something
+            ok, jpeg_buf = _cv2.imencode('.jpg', annotated, [_cv2.IMWRITE_JPEG_QUALITY, jpeg_q])
+            if not ok:
+                ok, jpeg_buf = _cv2.imencode('.jpg', frame, [_cv2.IMWRITE_JPEG_QUALITY, 60])
+            if not ok:
+                time.sleep(0.01)
+                continue
 
-        elapsed = time.monotonic() - t0
-        remaining = frame_delay - elapsed
-        if remaining > 0:
-            time.sleep(remaining)
+            b64 = base64.b64encode(jpeg_buf.tobytes()).decode('utf-8')
+            final_w, final_h = annotated.shape[1], annotated.shape[0]
+
+            # Refresh geolocation only every 150 frames
+            _loc_refresh_counter += 1
+            if _loc_refresh_counter >= 150:
+                _cached_location = geolocation_engine.get_current_location()
+                _loc_refresh_counter = 0
+
+            display_latency_ms = (time.monotonic() - t0) * 1000
+            scene = scene_profiler.get_profile(camera_id)
+            payload = json.dumps({
+                "camera_id": camera_id,
+                "frame": b64,
+                "width": final_w,
+                "height": final_h,
+                "detections": draw_dets,   # ← scaled to match JPEG dims (was 'detections' = original res, causing click misalignment)
+                "fps": int(1.0 / max(0.001, time.monotonic() - t0)),
+                "timestamp": datetime.datetime.now().astimezone().isoformat(),
+                "latitude": _cached_location["latitude"],
+                "longitude": _cached_location["longitude"],
+                "latency_ms": round(display_latency_ms, 1),
+                "ai_latency_ms": round(shared_state["ai_latency_ms"], 1),
+                "latency_status": latency_guard.status,
+                "scene_brightness": round(scene.avg_brightness, 1),
+                "scene_density": round(scene.avg_density, 1),
+                "adaptive_conf": round(threshold_calibrator.get_threshold(camera_id), 3),
+                "activity_score": round(activity, 3),
+            }, cls=_NumpySafeEncoder)
+
+            stream_info = active_streams[camera_id]
+            stream_info["latest_ws_payload"] = payload
+            stream_info["frame_seq"] = stream_info.get("frame_seq", 0) + 1
+
+            elapsed = time.monotonic() - t0
+            remaining = frame_delay - elapsed
+            if remaining > 0:
+                time.sleep(remaining)
+
+        except Exception as loop_err:
+            print(f"[Stream {camera_id}] DISPLAY LOOP ERROR: {loop_err}")
+            import traceback; traceback.print_exc()
+            time.sleep(0.1)  # Prevent tight crash loop
 
     shared_state["running"] = False
     ai_thread.join(timeout=3.0)
@@ -495,22 +566,17 @@ async def get_person_crop(camera_id: str, global_id: str):
 async def ws_streams(websocket: WebSocket):
     """Multiplexed video stream for all cameras to bypass browser connection limits."""
     await websocket.accept()
+    print(f"[WebSocket] Multi-stream client connected from {websocket.client}")
     last_seqs = {}
     try:
         while True:
-            sent_any = False
             for camera_id, stream in list(active_streams.items()):
                 current_seq = stream.get("frame_seq", 0)
                 if current_seq != last_seqs.get(camera_id, -1):
                     payload = stream.get("latest_ws_payload")
                     if payload:
-                        # Fast string manipulation to inject camera_id without JSON parse overhead
-                        injected = f'{{"camera_id": "{camera_id}", ' + payload[1:]
-                        await websocket.send_text(injected)
+                        await websocket.send_text(payload)
                         last_seqs[camera_id] = current_seq
-                        sent_any = True
-            
-            # Poll at 60Hz
             await asyncio.sleep(0.016)
     except WebSocketDisconnect:
         pass

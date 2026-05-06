@@ -172,7 +172,7 @@ export default function VideoStream({ streamId, subscribeToFrames, setFps, onPer
 
         return (
           <div key={det.global_id}>
-            {/* Clickable box */}
+            {/* Clickable box — always visible, brighter on hover */}
             <div
               title={`Analyze: ${det.display_name || det.global_id}`}
               onClick={() => onPersonClick && onPersonClick(det.global_id)}
@@ -182,14 +182,48 @@ export default function VideoStream({ streamId, subscribeToFrames, setFps, onPer
                 ...css,
                 cursor: 'crosshair',
                 zIndex: 20,
-                border: isHovered ? `2px solid ${riskColor}` : '2px solid transparent',
+                // Always show a faint border so the box is visible and clickable
+                border: isHovered
+                  ? `2px solid ${riskColor}`
+                  : `1.5px solid ${riskColor}80`,
                 borderRadius: 4,
-                transition: 'all 0.15s ease',
+                transition: 'all 0.12s ease',
                 boxSizing: 'border-box',
-                background: isHovered ? `${riskColor}18` : 'transparent',
-                boxShadow: isHovered ? `0 0 12px ${riskColor}40` : 'none',
+                // Subtle always-on fill so the click area is obvious
+                background: isHovered
+                  ? `${riskColor}22`
+                  : `${riskColor}08`,
+                boxShadow: isHovered
+                  ? `0 0 14px ${riskColor}50, inset 0 0 6px ${riskColor}20`
+                  : `0 0 4px ${riskColor}30`,
+                pointerEvents: 'auto',
               }}
             />
+
+            {/* Always-visible person ID tag at the bottom of the box */}
+            <div
+              style={{
+                position: 'absolute',
+                left: css.left,
+                top: css.top + css.height,
+                zIndex: 21,
+                background: `${riskColor}cc`,
+                color: '#fff',
+                fontSize: '0.58rem',
+                fontWeight: 700,
+                fontFamily: 'monospace',
+                padding: '1px 5px',
+                borderRadius: '0 0 3px 3px',
+                whiteSpace: 'nowrap',
+                pointerEvents: 'none',
+                letterSpacing: '0.02em',
+                maxWidth: css.width,
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+              }}
+            >
+              {det.display_name || det.global_id}
+            </div>
 
             {/* Hover info tooltip */}
             {isHovered && (
