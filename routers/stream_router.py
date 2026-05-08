@@ -645,3 +645,35 @@ async def ws_alerts(websocket: WebSocket):
             await asyncio.sleep(1)
     except WebSocketDisconnect:
         pass
+
+
+@router.get("/stream/luggage")
+async def get_luggage_status():
+    """Live airport luggage tracking status for the BaggageIntel panel."""
+    try:
+        from modules.luggage_tracker import luggage_tracker
+        bags = luggage_tracker.get_all_bags()
+        result = []
+        for bag in bags:
+            result.append({
+                "bag_id":          bag.get("bag_id", ""),
+                "class_name":      bag.get("class_name", ""),
+                "state":           bag.get("state", ""),
+                "owner_id":        bag.get("current_owner"),
+                "first_owner":     bag.get("first_owner_id"),
+                "put_down_count":  bag.get("put_down_count", 0),
+                "owner_count":     bag.get("owner_count", 1),
+                "unattended_s":    round(bag.get("unattended_seconds", 0.0), 1),
+                "camera_id":       bag.get("camera_id", ""),
+                "global_track_id": bag.get("global_track_id", ""),
+            })
+        fusion_stats = {}
+        try:
+            from modules.sensor_fusion import get_fusion_layer
+            fl = get_fusion_layer()
+            fusion_stats = {"gallery_size": fl.gallery_size(), "kalman_tracks": fl.kalman_active()}
+        except Exception:
+            pass
+        return {"bags": result, "fusion": fusion_stats}
+    except Exception as e:
+        return {"bags": [], "error": str(e)}

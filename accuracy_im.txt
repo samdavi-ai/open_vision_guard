@@ -1,79 +1,97 @@
-You are a senior AI systems engineer responsible for productionizing an advanced surveillance system (OpenVisionGuard).
+I have an existing airport luggage tracking codebase that uses YOLO + ByteTrack 
+for per-camera detection and a per-bag state machine 
+(UNOWNED → CARRIED → PUT_DOWN with alert thresholds).
 
-The system already includes:
+I need you to implement a SensorFusionLayer that sits between the raw detections 
+and the AirportLuggageTracker.update() call. Do not modify the existing state 
+machine or alert engine.
 
-* YOLOv8m detection
-* Smart multi-scale inference
-* ROI re-detection
-* Temporal stability and tracking
-* Track quality scoring
-* Occlusion handling
-* Evaluation pipeline (Precision, Recall, mAP)
+--- EXISTING INTERFACE (do not change) ---
+# What currently feeds the tracker:
+detections: list[Detection]  
+# Detection has: bbox (x,y,w,h), confidence, camera_id, frame_id, timestamp
 
----
+AirportLuggageTracker.update(detections: list[Detection]) -> list[TrackedBag]
 
-## 🎯 OBJECTIVE
+--- WHAT TO BUILD ---
 
-Harden the system for real-world deployment across multiple cameras and environments.
+1. SpatialAligner
+   - Accept a per-camera homography matrix (H: 3x3 np.ndarray) at init
+   - Method: align(detection: Detection) -> Detection
+     Projects bbox center from camera pixel space into a shared world-coordinate 
+     frame using cv2.perspectiveTransform
+   - Load homographies from a YAML config file keyed by camera_id
 
----
+2. AppearanceEmbedder
+   - Use OSNet (torchreid) or a CLIP ViT-B/32 patch as the backbone
+   - Method: embed(crop: np.ndarray) -> np.ndarray  shape (128,)
+   - Crops are taken from the RGB frame using the aligned bbox
+   - Normalize embeddings to unit length before returning
 
-## 🧠 REQUIRED IMPROVEMENTS
+3. EmbeddingGallery
+   - In-memory dict: track_id -> (embedding: np.ndarray, timestamp: float)
+   - Method: upsert(track_id, embedding, timestamp)
+   - Method: query(embedding) -> tuple[track_id | None, score: float]
+     Uses cosine similarity; returns best match above threshold (default 0.82)
+     Returns (None, 0.0) if no match or gallery is empty
+   - Method: evict_stale(ttl_seconds=300)
+     Call this once per second in a background thread
 
-### 1. Adaptive Threshold Calibration
+4. KalmanMotionPredictor
+   - One cv2.KalmanFilter instance per active track_id
+   - State vector: [x, y, vx, vy] in world coords
+   - Method: predict(track_id) -> (x, y)
+   - Method: update(track_id, x, y)
+   - Use prediction to pre-filter gallery candidates before cosine comparison
+     (only compare embeddings whose predicted position is within 150px world units)
 
-* Automatically adjust confidence thresholds per camera
-* Use rolling statistics from recent detections
+5. SensorFusionLayer  (orchestrates all of the above)
+   - Init: takes camera_ids, homography_config_path, similarity_threshold=0.82
+   - Method: fuse(
+         raw_detections: list[Detection],
+         rgb_frames: dict[camera_id, np.ndarray],
+         depth_frames: dict[camera_id, np.ndarray] | None = None
+     ) -> list[FusedDetection]
 
----
+   FusedDetection extends Detection with:
+     global_track_id: str        # stable across zones, format "BAG-{uuid4[:8]}"
+     embedding: np.ndarray       # 128-d unit vector
+     reid_score: float           # cosine score of the match (0.0 if new track)
+     is_new_track: bool
+     world_xy: tuple[float, float]
 
-### 2. Latency Guard System
+   Internal fuse() logic:
+     a. For each raw detection:
+        - align bbox to world coords via SpatialAligner
+        - crop RGB frame, compute embedding via AppearanceEmbedder
+        - run KalmanMotionPredictor.predict() to get candidate region
+        - query EmbeddingGallery with spatial pre-filter
+        - if score >= threshold: assign existing track_id, is_new_track=False
+        - else: mint new track_id, is_new_track=True, flag as stranger candidate
+        - update gallery and Kalman filter
+     b. If depth_frames provided:
+        - attach median Z value from depth map at bbox center as detection.depth_z
+        - use depth_z to disambiguate overlapping bboxes (same XY, different Z = 
+          different objects)
+     c. Return list[FusedDetection] sorted by track_id
 
-* Monitor processing latency
-* Dynamically disable expensive features when latency exceeds threshold
+--- INTEGRATION POINT ---
+Replace the existing call:
+  tracker.update(raw_detections)
+With:
+  fused = fusion_layer.fuse(raw_detections, rgb_frames, depth_frames)
+  tracker.update(fused)   # FusedDetection is a drop-in superset of Detection
 
----
-
-### 3. Scene Profiling
-
-* Build per-camera profiles (lighting, density, motion patterns)
-* Adjust detection parameters dynamically
-
----
-
-### 4. False Positive Memory
-
-* Track recurring false detections
-* Suppress repeated patterns
-
----
-
-### 5. Edge Case Handling
-
-* Detect sudden lighting changes
-* Handle camera shake and noise
-* Adjust detection behavior dynamically
-
----
-
-### 6. Evaluation Rigor
-
-* Enforce proper dataset split
-* Compute mAP@50 and mAP@50:95
-* Validate across multiple scenarios
-
----
-
-## 🔄 OUTPUT REQUIRED
-
-* Updated system architecture (with adaptive layer)
-* Code-level integration strategy
-* Pseudocode for adaptive systems
-* Performance impact analysis
-
----
-
-## ⚠️ RULES
-
-* Must not reduce accuracy
-* Must maintain real-time performance* Must generalize across environments---Now harden the system for production deployment.
+--- CONSTRAINTS ---
+- Python 3.11+, OpenCV 4.x, PyTorch 2.x
+- No breaking changes to existing Detection or TrackedBag dataclasses — 
+  only extend them
+- SensorFusionLayer must be stateless across calls except for the gallery 
+  and Kalman filters (thread-safe with a threading.Lock)
+- Add a FusionConfig dataclass for all tuneable params 
+  (threshold, ttl, kalman_noise_cov, spatial_filter_radius)
+- Write unit tests for: gallery eviction, cosine match at boundary score, 
+  Kalman predict-then-update round-trip, and align() with a known homography
+- Add a FusionMetrics dataclass that fuse() populates: 
+  n_new_tracks, n_reidentified, n_spatial_filtered, mean_reid_score
+  Log this every 100 frames at DEBUG level

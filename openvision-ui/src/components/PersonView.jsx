@@ -205,7 +205,7 @@ export default function PersonView({ globalId, cameraId = 'CAM_01', apiBase, onB
         <div style={S.grid}>
 
         {/* ═══ LEFT COLUMN: Live Feed + Movement ═══ */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8, overflowY: 'auto', minHeight: 0 }}>
 
           {/* Live Crop */}
           <Card icon={<Eye size={12} />} title="LIVE TRACKING FEED" accent={connected ? '#22c55e' : '#475569'}>
@@ -256,7 +256,7 @@ export default function PersonView({ globalId, cameraId = 'CAM_01', apiBase, onB
         </div>
 
         {/* ═══ CENTER COLUMN: Identity + Threat + Objects ═══ */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8, overflowY: 'auto', minHeight: 0 }}>
 
           {/* Identity */}
           <Card icon={<Fingerprint size={12} />} title="IDENTITY">
@@ -332,7 +332,7 @@ export default function PersonView({ globalId, cameraId = 'CAM_01', apiBase, onB
         </div>
 
         {/* ═══ RIGHT COLUMN: Entry/Exit + Alerts + Timeline ═══ */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 8, minHeight: 0 }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8, minHeight: 0, overflowY: 'auto' }}>
 
           {/* Presence & Frequency */}
           <Card icon={<LogIn size={12} />} title="PRESENCE &amp; FREQUENCY">
@@ -369,16 +369,16 @@ export default function PersonView({ globalId, cameraId = 'CAM_01', apiBase, onB
           </Card>
 
           {/* Camera Map Timeline */}
-          <Card icon={<MapPin size={12} />} title="CAMERA MAP &amp; TIMELINE" style={{ flex: 1, minHeight: 0, overflow: 'hidden' }}>
+          <Card icon={<MapPin size={12} />} title="CAMERA MAP & TIMELINE" style={{ flex: 1, minHeight: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
             <CameraMapTimeline history={fullTimeline} />
           </Card>
         </div>
       </div>
       ) : activeTab === 'analytics' ? (
         /* ═══ ANALYTICS TAB ═══ */
-        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', padding: 15, overflow: 'hidden' }}>
-          <Card icon={<BarChart3 size={14} />} title="MOVEMENT & KINETICS ANALYTICS (REAL-TIME)" style={{ flex: 1 }}>
-            <div style={{ flex: 1, padding: 20, minHeight: 0 }}>
+        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', padding: 15, overflow: 'hidden', minHeight: 0 }}>
+          <Card icon={<BarChart3 size={14} />} title="MOVEMENT & KINETICS ANALYTICS (REAL-TIME)" style={{ flex: 1, minHeight: 0 }}>
+            <div style={{ flex: 1, padding: 20, minHeight: 0, height: 'calc(100% - 40px)' }}>
               {movementLogs.length > 0 ? (
                 <ResponsiveContainer width="100%" height="100%">
                   <LineChart data={movementLogs} margin={{ top: 10, right: 30, left: 0, bottom: 0 }}>
@@ -415,7 +415,7 @@ export default function PersonView({ globalId, cameraId = 'CAM_01', apiBase, onB
         </div>
       ) : activeTab === 'ai' ? (
         /* ═══ AI INTELLIGENCE PROFILE TAB ═══ */
-        <div style={{ flex: 1, padding: 20, overflow: 'auto' }}>
+        <div style={{ flex: 1, padding: 20, overflowY: 'auto', minHeight: 0 }}>
           <div style={{
             maxWidth: 760, margin: '0 auto',
             background: 'linear-gradient(160deg, rgba(139,92,246,0.06), rgba(59,130,246,0.04))',
@@ -487,11 +487,11 @@ export default function PersonView({ globalId, cameraId = 'CAM_01', apiBase, onB
         </div>
       ) : (
         /* ═══ LOGS TAB ═══ */
-        <div style={{ flex: 1, display: 'grid', gridTemplateColumns: '3fr 2fr', gap: 10, padding: 10, overflow: 'hidden' }}>
+        <div style={{ flex: 1, display: 'grid', gridTemplateColumns: '3fr 2fr', gap: 10, padding: 10, overflow: 'hidden', minHeight: 0 }}>
           
           {/* Face Recognition Log */}
-          <Card icon={<Eye size={14} />} title="FACE RECOGNITION LOG" style={{ overflow: 'hidden' }}>
-            <div style={{ flex: 1, overflowY: 'auto', padding: 10 }}>
+          <Card icon={<Eye size={14} />} title="FACE RECOGNITION LOG" style={{ overflow: 'hidden', minHeight: 0 }}>
+            <div style={{ overflowY: 'auto', padding: 10, height: 'calc(100% - 38px)' }}>
               {faceLogs.length > 0 ? (
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(140px, 1fr))', gap: 10 }}>
                   {faceLogs.map((log, i) => (
@@ -522,8 +522,8 @@ export default function PersonView({ globalId, cameraId = 'CAM_01', apiBase, onB
           </Card>
 
           {/* Presence Timeline Log */}
-          <Card icon={<Clock size={14} />} title="PRESENCE TIMELINE" style={{ overflow: 'hidden' }}>
-             <div style={{ flex: 1, overflowY: 'auto', padding: 10 }}>
+          <Card icon={<Clock size={14} />} title="PRESENCE TIMELINE" style={{ overflow: 'hidden', minHeight: 0 }}>
+             <div style={{ overflowY: 'auto', padding: 10, height: 'calc(100% - 38px)' }}>
                {presenceLogs.length > 0 ? (
                  <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                     {presenceLogs.map((log, i) => (
@@ -969,6 +969,7 @@ const S = {
   },
   grid: {
     flex: 1, display: 'grid', gridTemplateColumns: '1fr 1fr 1fr',
+    gridTemplateRows: '1fr',
     gap: 8, padding: 8, overflow: 'hidden', minHeight: 0, zIndex: 1,
   },
   card: {

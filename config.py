@@ -270,5 +270,65 @@ class OpenVisionConfig:
     # 5 = every 5th frame (basic, fastest — use for 4+ cameras with all settings on)
     heavy_feature_stride: int = 3
 
+    # ══════════════════════════════════════════════════════════════════════════
+    #  AIRPORT LUGGAGE INTELLIGENCE
+    # ══════════════════════════════════════════════════════════════════════════
+
+    # ── Carry-zone geometry ───────────────────────────────────────────────────
+    # A bag is "carried" when its centre is within (person_height × ratio) px
+    # of the person's centre.  0.60 = 60% of body height.
+    luggage_carry_distance_ratio: float = 0.60
+
+    # Fallback absolute carry distance when no person bbox is available
+    luggage_putdown_distance_px: float = 80.0
+
+    # Max pixel distance to consider a direct hand-to-hand transfer (vs. pick-up
+    # after owner walked away).  Should be ~1 arm-length in frame pixels.
+    luggage_handover_radius_px: float = 120.0
+
+    # ── Unattended bag timers (security critical for airports) ────────────────
+    # Warning: bag on floor for this many seconds with no owner nearby
+    luggage_unattended_warn_s: float = 30.0
+    # Critical: full security alert — escalate to operator immediately
+    luggage_unattended_critical_s: float = 60.0
+
+    # ── Stale bag eviction ────────────────────────────────────────────────────
+    # Remove a bag record after it hasn't been detected for this many seconds
+    luggage_stale_after_s: float = 60.0
+
+    # ── Session exit timeout ──────────────────────────────────────────────────
+    # How many seconds a person must be absent before they are "confirmed exited"
+    # and their session is closed + bag exit-match generated.
+    # Airport value: 15s (corridors are wide, exits are clear-cut)
+    luggage_session_exit_timeout_s: float = 15.0
+
+    # ══════════════════════════════════════════════════════════════════════════
+    #  SENSOR FUSION LAYER
+    # ══════════════════════════════════════════════════════════════════════════
+
+    # Cosine similarity threshold for gallery match (bag Re-ID)
+    # 0.82 = strict match required (fewer false-positives, slightly more ID breaks)
+    fusion_similarity_threshold: float = 0.82
+
+    # World-unit radius for Kalman spatial pre-filter.
+    # Only gallery entries within this distance of the predicted position are
+    # compared by cosine similarity. Reduces false cross-bag matches.
+    fusion_spatial_filter_radius: float = 150.0
+
+    # Gallery TTL: remove bag embeddings not seen in this many seconds (5 min)
+    fusion_gallery_ttl_s: float = 300.0
+
+    # Kalman filter process noise covariance (lower = smoother, slower to adapt)
+    fusion_kalman_noise_cov: float = 1e-4
+
+    # Kalman filter measurement noise covariance
+    fusion_kalman_meas_noise: float = 1e-2
+
+    # OSNet-AIN embedding dimension (do not change unless swapping models)
+    fusion_embedding_dim: int = 512
+
+    # Log FusionMetrics every N frames (at DEBUG level)
+    fusion_log_interval_frames: int = 100
+
 # Global config instance
 config = OpenVisionConfig()

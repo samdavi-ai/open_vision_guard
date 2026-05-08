@@ -1,19 +1,27 @@
-import React, { useState, useEffect } from 'react';
+﻿import React, { useState, useEffect } from 'react';
 import { AlertTriangle, Clock, Package, PackageCheck, PackageMinus, ArrowRightLeft, X, Camera, ShieldAlert, ZoomIn } from 'lucide-react';
 
 /* ── Severity helpers ── */
 const SEV_COLOR = { critical: '#ef4444', high: '#f97316', medium: '#eab308', low: '#22c55e' };
 const SEV_BG    = { critical: 'rgba(239,68,68,0.10)', high: 'rgba(249,115,22,0.10)', medium: 'rgba(234,179,8,0.10)', low: 'rgba(34,197,94,0.10)' };
 
-/* ── Alert type display config ── */
+/* -- Alert type display config -- */
 const ALERT_CONFIG = {
-  baggage_swap:       { icon: <ArrowRightLeft size={14}/>, label: 'BAGGAGE SWAP',      emoji: '🔴' },
-  baggage_taken:      { icon: <PackageCheck size={14}/>,   label: 'ITEM TAKEN',        emoji: '🚨' },
-  baggage_left_behind:{ icon: <PackageMinus size={14}/>,   label: 'ITEM LEFT BEHIND',  emoji: '🚨' },
-  luggage_abandoned:  { icon: <Package size={14}/>,        label: 'LUGGAGE ABANDONED', emoji: '⚠️' },
-  loitering:          { icon: <ShieldAlert size={14}/>,    label: 'LOITERING',         emoji: '⚠️' },
-  sudden_movement:    { icon: <AlertTriangle size={14}/>,  label: 'SUDDEN MOVEMENT',   emoji: '⚠️' },
-  luggage_theft:      { icon: <Package size={14}/>,        label: 'LUGGAGE THEFT',     emoji: '🚨' },
+  baggage_swap:            { icon: <ArrowRightLeft size={14}/>, label: 'BAGGAGE SWAP',         emoji: 'EX' },
+  baggage_taken:           { icon: <PackageCheck size={14}/>,   label: 'ITEM TAKEN',            emoji: 'AL' },
+  baggage_left_behind:     { icon: <PackageMinus size={14}/>,   label: 'ITEM LEFT BEHIND',      emoji: 'AL' },
+  luggage_abandoned:       { icon: <Package size={14}/>,        label: 'LUGGAGE ABANDONED',     emoji: 'WN' },
+  bag_theft_suspect:       { icon: <ShieldAlert size={14}/>,    label: 'THEFT SUSPECT',         emoji: 'AL' },
+  bag_unattended_critical: { icon: <ShieldAlert size={14}/>,    label: 'UNATTENDED CRITICAL',   emoji: 'AL' },
+  bag_unattended_warning:  { icon: <AlertTriangle size={14}/>,  label: 'UNATTENDED BAG',        emoji: 'WN' },
+  bag_handover:            { icon: <ArrowRightLeft size={14}/>, label: 'BAG HANDOVER',          emoji: 'TR' },
+  bag_put_down:            { icon: <Package size={14}/>,        label: 'BAG PUT DOWN',          emoji: 'DN' },
+  bag_picked_up_by_owner:  { icon: <PackageCheck size={14}/>,   label: 'BAG RETRIEVED',         emoji: 'OK' },
+  bag_carried:             { icon: <PackageCheck size={14}/>,   label: 'BAG CARRIED',           emoji: 'CR' },
+  bag_first_seen:          { icon: <Package size={14}/>,        label: 'BAG DETECTED',          emoji: 'EY' },
+  loitering:               { icon: <ShieldAlert size={14}/>,    label: 'LOITERING',             emoji: 'WN' },
+  sudden_movement:         { icon: <AlertTriangle size={14}/>,  label: 'SUDDEN MOVEMENT',       emoji: 'WN' },
+  luggage_theft:           { icon: <Package size={14}/>,        label: 'LUGGAGE THEFT',         emoji: 'AL' },
 };
 const DEFAULT_CFG   = { icon: <AlertTriangle size={14}/>, label: 'ALERT', emoji: '⚠️' };
 

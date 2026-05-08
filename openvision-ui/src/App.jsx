@@ -5,6 +5,7 @@ import AlertsFeed from './components/AlertsFeed';
 import PersonView from './components/PersonView';
 import SettingsPanel from './components/SettingsPanel';
 import LLMChat from './components/LLMChat';
+import BaggageIntelPanel from './components/BaggageIntelPanel';
 import './index.css';
 
 const backendHost =
@@ -33,6 +34,7 @@ export default function App() {
   const [availableFiles, setAvailableFiles] = useState([]);
   const [showSettings, setShowSettings] = useState(false);
   const [showChat,     setShowChat]     = useState(false);
+  const [showBaggage, setShowBaggage] = useState(false);
 
   const now          = useLiveClock();
   const alertsWsRef  = useRef(null);
@@ -200,6 +202,23 @@ export default function App() {
               &nbsp;·&nbsp;{alerts.length} alerts
             </span>
           )}
+          {/* Baggage Intel button */}
+          <button
+            onClick={() => setShowBaggage(!showBaggage)}
+            title="Luggage Intelligence"
+            style={{
+              background: showBaggage ? 'rgba(139,92,246,0.2)' : 'rgba(255,255,255,0.05)',
+              border: showBaggage ? '1px solid rgba(139,92,246,0.4)' : '1px solid rgba(255,255,255,0.1)',
+              color: showBaggage ? '#a78bfa' : 'var(--text-dim)', borderRadius: 8,
+              width: 32, height: 32, cursor: 'pointer',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              transition: 'background 0.15s, color 0.15s',
+            }}
+            onMouseEnter={e => { e.currentTarget.style.background='rgba(139,92,246,0.15)'; e.currentTarget.style.color='#a78bfa'; }}
+            onMouseLeave={e => { if(!showBaggage){ e.currentTarget.style.background='rgba(255,255,255,0.05)'; e.currentTarget.style.color='var(--text-dim)'; } }}
+          >
+            <span style={{ fontSize: '1rem' }}>🧳</span>
+          </button>
           {/* AI Chat button */}
           <button
             onClick={() => setShowChat(true)}
@@ -249,6 +268,10 @@ export default function App() {
       {/* AI Chat */}
       {showChat && (
         <LLMChat apiBase={API_BASE} onClose={() => setShowChat(false)} />
+      )}
+      {/* Baggage Intel Panel */}
+      {showBaggage && (
+        <BaggageIntelPanel apiBase={API_BASE} onClose={() => setShowBaggage(false)} />
       )}
 
 
