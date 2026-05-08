@@ -32,10 +32,12 @@ class AlertEngine:
         now = datetime.datetime.now().astimezone()
         now_ts = now.timestamp()
 
-        # Deduplication check
+        # Deduplication check — honour per-type overrides first
         dedup_key = (global_id, alert_type)
         last_ts = self._dedup_cache.get(dedup_key, 0)
-        if (now_ts - last_ts) < config.alert_dedup_window_seconds:
+        overrides = getattr(config, "alert_dedup_overrides", {})
+        dedup_window = overrides.get(alert_type, config.alert_dedup_window_seconds)
+        if (now_ts - last_ts) < dedup_window:
             return None  # Skip duplicate
 
         self._dedup_cache[dedup_key] = now_ts
@@ -62,8 +64,16 @@ class AlertEngine:
             "camera_id": camera_id,
             "timestamp": now.isoformat(),
             "thumbnail_path": thumbnail_path,
-            "acknowledged": False
+            "acknowledged": False,
+            "narrative": None,  # filled async by LLM
         }
+
+        # Merge in any extra detail fields (baggage items, etc.)
+        if isinstance(details, dict):
+            for k in ("items_removed", "items_added", "entry_time", "exit_time",
+                      "weapon_type", "luggage_type", "zone_name", "risk_score"):
+                if k in details:
+                    alert[k] = details[k]
 
         # Persist to DB
         try:
@@ -71,8 +81,23 @@ class AlertEngine:
         except Exception as e:
             print(f"Error saving alert to DB: {e}")
 
-        # Push to WebSocket subscribers
+        # Push to WebSocket subscribers (sends alert immediately, narrative arrives shortly after)
         self._push_to_subscribers(alert)
+
+        # ── LLM narration (async, non-blocking) ──────────────────────────────
+        def _on_narrative(aid: str, narrative: str):
+            """Called when Groq returns the narrative — push update to subscribers."""
+            if narrative:
+                enriched = dict(alert)
+                enriched["narrative"] = narrative
+                self._push_to_subscribers(enriched)
+
+        try:
+            from modules.llm_engine import llm_engine
+            if llm_engine.available:
+                llm_engine.narrate_alert_async(alert, callback=_on_narrative)
+        except Exception:
+            pass
 
         return alert
 

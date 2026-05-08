@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { AlertTriangle, Clock, Package, PackageCheck, PackageMinus, ArrowRightLeft, X, Camera, ShieldAlert, ZoomIn } from 'lucide-react';
 
 /* ── Severity helpers ── */
@@ -26,8 +26,60 @@ function fmtTime(iso) {
    EVIDENCE MODAL — shown when user clicks an alert
 ════════════════════════════════════════════════════════════════ */
 function EvidenceModal({ alert, apiBase, onClose }) {
-  const [imgErr, setImgErr] = useState(false);
-  const [imgZoom, setImgZoom] = useState(false);
+  const [imgErr, setImgErr]       = useState(false);
+  const [imgZoom, setImgZoom]     = useState(false);
+  const [narrative, setNarrative] = useState(alert.narrative || null);
+  const [narLoading, setNarLoading] = useState(!alert.narrative);
+  const [narTimedOut, setNarTimedOut] = useState(false);
+
+  // Fetch AI narrative when modal opens (if not already in the alert object)
+  useEffect(() => {
+    if (narrative) return;  // already have it
+    let cancelled = false;
+    setNarLoading(true);
+    setNarTimedOut(false);
+
+    // 15-second hard timeout
+    const timeout = setTimeout(() => {
+      if (!cancelled) { setNarLoading(false); setNarTimedOut(true); }
+    }, 15000);
+
+    fetch(`${apiBase}/llm/narrate/${alert.alert_id}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          alert_id:      alert.alert_id,
+          type:          alert.type,
+          global_id:     alert.global_id,
+          camera_id:     alert.camera_id,
+          message:       alert.message,
+          severity:      alert.severity,
+          timestamp:     alert.timestamp,
+          items_added:   alert.items_added,
+          items_removed: alert.items_removed,
+          entry_time:    alert.entry_time,
+          exit_time:     alert.exit_time,
+        }),
+      })
+      .then(r => r.ok ? r.json() : null)
+      .then(d => {
+        if (!cancelled) {
+          clearTimeout(timeout);
+          setNarLoading(false);
+          if (d?.narrative) setNarrative(d.narrative);
+          else setNarTimedOut(true);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          clearTimeout(timeout);
+          setNarLoading(false);
+          setNarTimedOut(true);
+        }
+      });
+
+    return () => { cancelled = true; clearTimeout(timeout); };
+  }, [alert.alert_id, apiBase]);
 
   const sevColor = SEV_COLOR[alert.severity] || '#94a3b8';
   const cfg      = ALERT_CONFIG[alert.type] || DEFAULT_CFG;
@@ -173,15 +225,77 @@ function EvidenceModal({ alert, apiBase, onClose }) {
           <div style={{ fontSize: '0.72rem', fontWeight: 700, color: 'var(--text-dim)', textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: 8 }}>
             What Happened
           </div>
-          <div style={{
-            background: `${sevColor}08`,
-            border: `1px solid ${sevColor}20`,
-            borderRadius: 10, padding: '0.75rem 1rem',
-            fontSize: '0.82rem', lineHeight: 1.6, color: 'var(--text-main)',
-          }}>
-            {alert.message}
-          </div>
+
+          {/* LLM Narrative — fetched on modal open */}
+          {narrative ? (
+            <div style={{
+              background: 'rgba(59,130,246,0.07)',
+              border: '1px solid rgba(59,130,246,0.22)',
+              borderRadius: 10, padding: '0.85rem 1rem',
+              fontSize: '0.84rem', lineHeight: 1.7, color: 'var(--text-main)',
+              position: 'relative',
+            }}>
+              <div style={{
+                position: 'absolute', top: -9, left: 12,
+                background: 'linear-gradient(135deg, #3b82f6, #8b5cf6)',
+                borderRadius: 4, padding: '1px 7px',
+                fontSize: '0.58rem', fontWeight: 800, color: '#fff',
+                textTransform: 'uppercase', letterSpacing: '0.06em',
+                display: 'flex', alignItems: 'center', gap: 3,
+              }}>
+                🤖 AI Analysis
+              </div>
+              {narrative}
+            </div>
+          ) : narLoading ? (
+            /* Fetching from Groq — show spinner with progress */
+            <div style={{
+              background: 'rgba(59,130,246,0.04)',
+              border: '1px solid rgba(59,130,246,0.15)',
+              borderRadius: 10, padding: '0.85rem 1rem',
+              display: 'flex', alignItems: 'center', gap: 10,
+            }}>
+              <div style={{
+                width: 18, height: 18, borderRadius: '50%',
+                border: '2px solid rgba(59,130,246,0.2)',
+                borderTop: '2px solid #3b82f6',
+                animation: 'spin 0.9s linear infinite', flexShrink: 0,
+              }} />
+              <div>
+                <div style={{ fontSize: '0.78rem', color: '#93c5fd', fontWeight: 600 }}>Generating AI analysis…</div>
+                <div style={{ fontSize: '0.65rem', color: 'var(--text-dim)', marginTop: 2 }}>Asking Llama 4 Scout via Groq · up to 15s</div>
+              </div>
+            </div>
+          ) : (
+            /* Timed out or failed — show raw message cleanly */
+            <div style={{
+              background: `${sevColor}06`,
+              border: `1px solid ${sevColor}18`,
+              borderRadius: 10, padding: '0.75rem 1rem',
+            }}>
+              <div style={{ fontSize: '0.82rem', lineHeight: 1.6, color: 'var(--text-main)', marginBottom: narTimedOut ? 8 : 0 }}>
+                {alert.message}
+              </div>
+              {narTimedOut && (
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: '0.65rem', color: 'var(--text-dim)' }}>
+                  <span style={{ fontSize: '0.7rem' }}>⚠</span>
+                  AI analysis unavailable — check GROQ_API_KEY or retry later
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Raw message always shown as small secondary detail */}
+          {alert.narrative && (
+            <div style={{
+              marginTop: 6, fontSize: '0.7rem', color: 'var(--text-dim)',
+              padding: '0 0.3rem', lineHeight: 1.5,
+            }}>
+              <span style={{ opacity: 0.5 }}>System: </span>{alert.message}
+            </div>
+          )}
         </div>
+
 
         {/* ── Item change diff (baggage alerts) ── */}
         {(removed.length > 0 || added.length > 0) && (

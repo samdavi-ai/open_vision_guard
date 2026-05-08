@@ -1,4 +1,10 @@
 import os
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 from fastapi import FastAPI
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -7,6 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from modules import database
 from core.orchestrator import orchestrator
 from routers import stream_router, identity_router, alert_router, search_router, config_router, face_log_router, analytics_router
+from routers import llm_router
 
 app = FastAPI(
     title="OpenVisionGuard",
@@ -46,6 +53,7 @@ app.include_router(search_router.router)
 app.include_router(config_router.router)
 app.include_router(face_log_router.router)
 app.include_router(analytics_router.router)
+app.include_router(llm_router.router)
 
 frontend_path = os.path.join(os.path.dirname(__file__), "frontend")
 assets_path = os.path.join(frontend_path, "assets")

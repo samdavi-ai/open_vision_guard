@@ -191,8 +191,16 @@ def _ai_inference_thread(camera_id: str, shared_state: dict):
             time.sleep(0.005)
             continue
 
-        # Check interval + motion gate. If not ready, sleep briefly and retry.
-        if not adaptive_controller.should_run_inference():
+        # Check interval + motion gate.
+        # In heavy mode (multiscale + reinference + pose on), bypass the zero-motion
+        # gate completely — the AI is already running as fast as it can, and gating
+        # it further would create multi-second gaps with no detections (flickering boxes).
+        _heavy_now = (
+            getattr(config, 'multiscale_detection_enabled', False) or
+            getattr(config, 'small_object_reinference_enabled', False) or
+            getattr(config, 'pose_enabled', False)
+        )
+        if not _heavy_now and not adaptive_controller.should_run_inference():
             time.sleep(0.005)
             continue
 
@@ -286,11 +294,22 @@ def _stream_worker(camera_id: str, source: str):
 
     active_streams[camera_id]["status"] = "running"
 
-    # TTL = 20 frames (0.8s at 25fps).
-    # With multiscale/reinference DISABLED: per-camera AI ≈ 100ms.
-    # 4-camera cycle = 4 × 100ms = 400ms → 20 frames (0.8s) safely bridges the gap.
-    # Velocity interpolation keeps boxes tracking smoothly between AI pulses.
-    memory = DetectionMemory(ttl_frames=20, interpolate=True, video_fps=native_fps)
+    # ── Dynamic TTL based on enabled features ────────────────────────────────
+    # With all settings disabled: AI ≈ 80-120ms → TTL=20 frames (0.8s) is fine.
+    # With multiscale + reinference + pose + face on: AI ≈ 600-1200ms per frame.
+    # TTL must be long enough so boxes persist between slow AI updates.
+    # We compute based on config: assume worst-case latency, target 3s of coverage.
+    _heavy_mode = (
+        getattr(config, 'multiscale_detection_enabled', False) or
+        getattr(config, 'small_object_reinference_enabled', False) or
+        getattr(config, 'pose_enabled', False) or
+        getattr(config, 'face_recognition_enabled', False)
+    )
+    _ttl_frames = int(native_fps * 3.0) if _heavy_mode else 20   # 3s vs 0.8s
+    _ttl_frames = max(20, min(_ttl_frames, 120))  # clamp [20, 120]
+    memory = DetectionMemory(ttl_frames=_ttl_frames, interpolate=True, video_fps=native_fps)
+    print(f"[Stream {camera_id}] DetectionMemory TTL={_ttl_frames} frames "
+          f"({'heavy mode' if _heavy_mode else 'normal mode'}), FPS={native_fps:.1f}")
 
     shared_state = {
         "running": True,
@@ -330,15 +349,15 @@ def _stream_worker(camera_id: str, source: str):
             ret, frame = cap.read()
             if not ret:
                 if not is_webcam:
-                    # VIDEO LOOP: clear all stale detections so old boxes don't
-                    # appear on the black/seeking frames during the reset seek.
-                    memory._store.clear()
-                    detections = []
-                    shared_state["detections"] = []
-                    shared_state["alerts"] = []
-                    active_streams[camera_id]["latest_detections"] = []
+                    # VIDEO LOOP: seek back to start immediately.
+                    # Do NOT clear detections here — let the TTL expire them naturally.
+                    # Clearing here causes ~1s of blank frames (clear → seek → AI warmup).
+                    # Instead: boxes fade gracefully as TTL ticks down while the video
+                    # seeks and the AI processes the first new frames.
                     cap.set(_cv2.CAP_PROP_POS_FRAMES, 0)
-                    time.sleep(0.15)
+                    shared_state["alerts"] = []   # clear queued alerts only (don't re-fire)
+                    # Tiny sleep just to let the seek settle — not 150ms
+                    time.sleep(0.02)
                     continue
                 print(f"[Stream] Warning: Failed to read frame from {camera_id}. Retrying...")
                 time.sleep(0.5)
@@ -351,6 +370,13 @@ def _stream_worker(camera_id: str, source: str):
 
             # Feed AI thread the latest frame (overwrite — we only care about newest)
             shared_state["ai_frame"] = frame  # no copy; AI thread reads only
+
+            # ── Adaptive TTL: keep boxes alive for at least 2× the AI cycle time ─
+            # This ensures boxes never vanish between AI frames regardless of
+            # which settings are enabled or when they were toggled on.
+            _ai_ms = shared_state.get("ai_latency_ms", 0.0)
+            _ttl_s = max(2.0, (_ai_ms / 1000.0) * 2.5)   # 2.5× AI cycle, min 2s
+            memory.set_ttl_seconds(_ttl_s)
 
             # Consume new AI detections if available
             ai_detections = shared_state["detections"]

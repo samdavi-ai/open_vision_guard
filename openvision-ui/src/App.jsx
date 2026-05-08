@@ -1,8 +1,10 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { Activity, ShieldAlert, Cpu, Upload, Video, Camera } from 'lucide-react';
+import { Activity, ShieldAlert, Cpu, Upload, Video, Camera, Settings, Bot } from 'lucide-react';
 import VideoStream from './components/VideoStream';
 import AlertsFeed from './components/AlertsFeed';
 import PersonView from './components/PersonView';
+import SettingsPanel from './components/SettingsPanel';
+import LLMChat from './components/LLMChat';
 import './index.css';
 
 const backendHost =
@@ -27,8 +29,10 @@ export default function App() {
   const [sourceData,  setSourceData]   = useState('');
   const [sourceMode,  setSourceMode]   = useState('url');
   const [alerts,      setAlerts]       = useState([]);
-  const [activePerson, setActivePerson] = useState(null); // {globalId, cameraId}
+  const [activePerson, setActivePerson] = useState(null);
   const [availableFiles, setAvailableFiles] = useState([]);
+  const [showSettings, setShowSettings] = useState(false);
+  const [showChat,     setShowChat]     = useState(false);
 
   const now          = useLiveClock();
   const alertsWsRef  = useRef(null);
@@ -196,12 +200,57 @@ export default function App() {
               &nbsp;·&nbsp;{alerts.length} alerts
             </span>
           )}
+          {/* AI Chat button */}
+          <button
+            onClick={() => setShowChat(true)}
+            title="AI Security Analyst"
+            style={{
+              background: showChat ? 'rgba(59,130,246,0.2)' : 'rgba(255,255,255,0.05)',
+              border: `1px solid ${showChat ? 'rgba(59,130,246,0.4)' : 'rgba(255,255,255,0.1)'}`,
+              color: showChat ? 'var(--accent)' : 'var(--text-dim)', borderRadius: 8,
+              width: 32, height: 32, cursor: 'pointer',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              transition: 'background 0.15s, color 0.15s',
+            }}
+            onMouseEnter={e => { e.currentTarget.style.background='rgba(59,130,246,0.15)'; e.currentTarget.style.color='var(--accent)'; }}
+            onMouseLeave={e => { if(!showChat){ e.currentTarget.style.background='rgba(255,255,255,0.05)'; e.currentTarget.style.color='var(--text-dim)'; } }}
+          >
+            <Bot size={15} />
+          </button>
+          {/* Settings button */}
+          <button
+            onClick={() => setShowSettings(true)}
+            title="System Settings"
+            style={{
+              background: 'rgba(255,255,255,0.05)',
+              border: '1px solid rgba(255,255,255,0.1)',
+              color: 'var(--text-dim)', borderRadius: 8,
+              width: 32, height: 32, cursor: 'pointer',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              transition: 'background 0.15s, color 0.15s',
+            }}
+            onMouseEnter={e => { e.currentTarget.style.background='rgba(59,130,246,0.15)'; e.currentTarget.style.color='var(--accent)'; }}
+            onMouseLeave={e => { e.currentTarget.style.background='rgba(255,255,255,0.05)'; e.currentTarget.style.color='var(--text-dim)'; }}
+          >
+            <Settings size={15} />
+          </button>
           <div style={S.statusBadge}>
             <div style={{ width: 7, height: 7, borderRadius: '50%', background: isStreaming ? 'var(--low)' : '#475569', alignSelf: 'center', animation: isStreaming ? 'pulse 2s infinite' : 'none' }} />
             {isStreaming ? 'Monitoring Active' : 'System Ready'}
           </div>
         </div>
       </header>
+
+      {/* Settings Drawer */}
+      {showSettings && (
+        <SettingsPanel apiBase={API_BASE} onClose={() => setShowSettings(false)} />
+      )}
+
+      {/* AI Chat */}
+      {showChat && (
+        <LLMChat apiBase={API_BASE} onClose={() => setShowChat(false)} />
+      )}
+
 
       {/* Grid: video | alerts */}
       <div style={S.mainGrid}>
@@ -304,7 +353,7 @@ export default function App() {
               </span>
             )}
           </div>
-          <div style={{ flex: 1, minHeight: 0, overflow: 'hidden' }}>
+          <div style={{ flex: 1, minHeight: 0, overflow: 'auto' }}>
             <AlertsFeed alerts={alerts} setAlerts={setAlerts} apiBase={API_BASE} />
           </div>
           {isStreaming && (

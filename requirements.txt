@@ -26,3 +26,5 @@ onnx>=1.15.0                  # ONNX export/validation
 onnxruntime>=1.17.0           # CPU inference and quantization tooling
 albumentations>=1.4.0         # Training-only blur/noise/weather augmentation support
 mediapipe>=0.10.9             # Lightweight pose estimation
+groq>=0.9.0                   # Groq API client (LLaMA 3 inference)
+python-dotenv>=1.0.0          # Load GROQ_API_KEY from .env file

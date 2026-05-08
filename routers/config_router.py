@@ -10,24 +10,30 @@ router = APIRouter(tags=["Config"])
 
 @router.get("/config")
 async def get_config():
-    """Get current system configuration."""
+    """Get current system configuration — all toggles and thresholds."""
     return {
-        "similarity_threshold": config.similarity_threshold,
-        "embedding_model": config.embedding_model,
-        "face_recognition_enabled": config.face_recognition_enabled,
-        "face_tolerance": config.face_tolerance,
-        "min_face_height_px": config.min_face_height_px,
-        "pose_enabled": config.pose_enabled,
-        "fall_confidence_threshold": config.fall_confidence_threshold,
-        "weapon_detection_enabled": config.weapon_detection_enabled,
-        "weapon_confidence_threshold": config.weapon_confidence_threshold,
-        "loitering_threshold_seconds": config.loitering_threshold_seconds,
-        "alert_dedup_window_seconds": config.alert_dedup_window_seconds,
-        "db_path": config.db_path,
-        "thumbnails_dir": config.thumbnails_dir,
-        "known_faces_dir": config.known_faces_dir,
-        "frame_jpeg_quality": config.frame_jpeg_quality,
-        "max_concurrent_cameras": config.max_concurrent_cameras,
+        # ── Detection Features ──
+        "multiscale_enabled":           config.multiscale_enabled,
+        "small_object_reinference":     config.small_object_reinference,
+        "redetection_on_loss_enabled":  config.redetection_on_loss_enabled,
+        "zero_motion_gate_enabled":     getattr(config, "zero_motion_gate_enabled", False),
+        # ── Alert Features ──
+        "weapon_detection_enabled":     config.weapon_detection_enabled,
+        "pose_enabled":                 config.pose_enabled,
+        "face_recognition_enabled":     config.face_recognition_enabled,
+        # ── Baggage / Session ──
+        "session_exit_timeout_s":       getattr(config, "session_exit_timeout_s", 20.0),
+        # ── Thresholds ──
+        "person_conf_threshold":        config.person_conf_threshold,
+        "object_conf_threshold":        config.object_conf_threshold,
+        "luggage_conf_threshold":       config.luggage_conf_threshold,
+        "similarity_threshold":         config.similarity_threshold,
+        "loitering_threshold_seconds":  config.loitering_threshold_seconds,
+        "alert_dedup_window_seconds":   config.alert_dedup_window_seconds,
+        # ── Display / Performance ──
+        "temporal_hold_frames":         config.temporal_hold_frames,
+        "frame_jpeg_quality":           config.frame_jpeg_quality,
+        "max_concurrent_cameras":       config.max_concurrent_cameras,
     }
 
 

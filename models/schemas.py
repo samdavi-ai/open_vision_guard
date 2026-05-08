@@ -111,18 +111,40 @@ class ZonesUpdateRequest(BaseModel):
 
 # ── Config ──
 class ConfigUpdateRequest(BaseModel):
+    # ── Re-ID / Similarity ──
     similarity_threshold: Optional[float] = None
-    face_recognition_enabled: Optional[bool] = None
-    face_tolerance: Optional[float] = None
-    min_face_height_px: Optional[int] = None
-    pose_enabled: Optional[bool] = None
-    fall_confidence_threshold: Optional[float] = None
+
+    # ── Detection Features ──
+    multiscale_enabled: Optional[bool] = None
+    small_object_reinference: Optional[bool] = None
+    redetection_on_loss_enabled: Optional[bool] = None
+    zero_motion_gate_enabled: Optional[bool] = None
+
+    # ── Alert Features ──
     weapon_detection_enabled: Optional[bool] = None
-    weapon_confidence_threshold: Optional[float] = None
+    pose_enabled: Optional[bool] = None
+    face_recognition_enabled: Optional[bool] = None
+
+    # ── Baggage / Session Tracking ──
+    session_exit_timeout_s: Optional[float] = None
+
+    # ── Thresholds ──
+    person_conf_threshold: Optional[float] = None
+    object_conf_threshold: Optional[float] = None
+    luggage_conf_threshold: Optional[float] = None
     loitering_threshold_seconds: Optional[int] = None
     alert_dedup_window_seconds: Optional[int] = None
+
+    # ── Display ──
+    temporal_hold_frames: Optional[int] = None
     frame_jpeg_quality: Optional[int] = None
     max_concurrent_cameras: Optional[int] = None
+
+    # ── Legacy fields ──
+    face_tolerance: Optional[float] = None
+    min_face_height_px: Optional[int] = None
+    fall_confidence_threshold: Optional[float] = None
+    weapon_confidence_threshold: Optional[float] = None
 
 
 # ── Face Registration ──

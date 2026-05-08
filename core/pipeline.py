@@ -369,7 +369,14 @@ class TemporalBuffer:
 
 
 class TrackIdentityStore:
-    """Maps per-camera ByteTrack IDs to stable session identities."""
+    """Maps per-camera ByteTrack IDs to stable session identities.
+
+    Handles the back-view → front-view identity problem: when a person turns
+    around, ByteTrack may lose and reassign the track ID. The 'recently lost'
+    registry remembers where each identity was last seen so new tracks that
+    appear nearby (within 5s, 200px) are re-linked to the same global_id
+    using the lenient cross_view_reid_threshold instead of minting a new one.
+    """
 
     def __init__(self) -> None:
         self._track_to_identity: Dict[Tuple[str, int], str] = {}
@@ -377,35 +384,108 @@ class TrackIdentityStore:
         self._fallback_tracks: Dict[Tuple[str, str], Dict[str, Any]] = {}
         self._next_id = 1
 
+        # ── Recently-lost track registry ──────────────────────────────────────
+        # (camera_id, global_id) → {bbox, last_seen, last_pos}
+        # Populated when cleanup() evicts a stale track mapping.
+        # Used to spatially re-link a new track to the same person after a turn.
+        self._lost_tracks: Dict[Tuple[str, str], Dict[str, Any]] = {}
+
     def _new_identity(self) -> str:
         global_id = f"Person_{self._next_id:03d}"
         self._next_id += 1
         return global_id
 
-    def resolve(self, camera_id: str, track_id: int, now: float, crop: Optional[np.ndarray] = None) -> str:
+    def mark_lost(self, camera_id: str, track_id: int, bbox: Optional[Any], now: float) -> None:
+        """Call this when a track disappears (e.g. ByteTrack evicts it)."""
         key = (camera_id, int(track_id))
-        
+        gid = self._track_to_identity.get(key)
+        if gid and bbox is not None:
+            cx = (bbox[0] + bbox[2]) / 2.0
+            cy = (bbox[1] + bbox[3]) / 2.0
+            self._lost_tracks[(camera_id, gid)] = {
+                "pos": (cx, cy),
+                "bbox": bbox,
+                "lost_at": now,
+            }
+
+    def _find_spatiotemporal_candidate(
+        self, camera_id: str, bbox: Any, now: float
+    ) -> Optional[str]:
+        """
+        Check if a brand-new track is near a recently-lost track on the same camera.
+        Returns the global_id of the closest recently-lost identity within the
+        configured time and distance windows, or None.
+        """
+        window_s = getattr(config, "spatiotemporal_reid_window_s", 5.0)
+        max_px   = getattr(config, "spatiotemporal_reid_max_px",   200.0)
+
+        cx = (bbox[0] + bbox[2]) / 2.0
+        cy = (bbox[1] + bbox[3]) / 2.0
+
+        best_gid  = None
+        best_dist = float("inf")
+
+        expired = []
+        for (cam, gid), info in self._lost_tracks.items():
+            if cam != camera_id:
+                continue
+            age = now - info["lost_at"]
+            if age > window_s:
+                expired.append((cam, gid))
+                continue
+            px, py = info["pos"]
+            dist = math.hypot(cx - px, cy - py)
+            if dist <= max_px and dist < best_dist:
+                best_dist = dist
+                best_gid  = gid
+
+        for k in expired:
+            self._lost_tracks.pop(k, None)
+
+        return best_gid
+
+    def resolve(self, camera_id: str, track_id: int, now: float,
+                crop: Optional[np.ndarray] = None,
+                bbox: Optional[Any] = None) -> str:
+        key = (camera_id, int(track_id))
+
         # If we already have a mapping for this tracker ID, reuse it
         if key in self._track_to_identity:
             gid = self._track_to_identity[key]
             self._identity_last_seen[gid] = now
             return gid
 
-        # NEW TRACK: Perform Re-ID to link local track to a Global ID
+        # ── NEW TRACK ──────────────────────────────────────────────────────────
+        # Step 1: Spatio-temporal candidate — did this track appear near a
+        #         recently-lost track? (person turned around / brief occlusion)
+        st_candidate = None
+        if bbox is not None:
+            st_candidate = self._find_spatiotemporal_candidate(camera_id, bbox, now)
+
+        # Step 2: Embedding Re-ID
         if crop is not None and crop.size > 0:
-            global_id = embedding_engine.get_or_create_identity(crop)
+            global_id = embedding_engine.get_or_create_identity(
+                crop,
+                camera_id=camera_id,
+                spatiotemporal_hint=st_candidate,   # passed to engine for threshold selection
+            )
+        elif st_candidate:
+            # No crop but we have a strong spatio-temporal match → reuse
+            global_id = st_candidate
         else:
-            # Fallback if no crop available (rare)
             global_id = f"Person_TEMP_{int(now)}"
-            
+
         self._track_to_identity[key] = global_id
         self._identity_last_seen[global_id] = now
+
+        # Remove from lost registry now that it's re-linked
+        self._lost_tracks.pop((camera_id, global_id), None)
         return global_id
 
-    def resolve_by_box(self, camera_id: str, bbox: BBox, now: float, crop: Optional[np.ndarray] = None) -> str:
+    def resolve_by_box(self, camera_id: str, bbox: Any, now: float, crop: Optional[np.ndarray] = None) -> str:
         """Fallback for boxes without a track_id (uses spatial proximity + Re-ID)."""
         if crop is not None and crop.size > 0:
-            return embedding_engine.get_or_create_identity(crop)
+            return embedding_engine.get_or_create_identity(crop, camera_id=camera_id)
 
         # Spatial-only fallback (if crop failed)
         best_key = None
@@ -507,6 +587,14 @@ class Pipeline:
         63: "laptop",       # Phase 5 — critical for baggage-swap detection
         67: "cell phone",   # Phase 5 — track phones as carried items
     }
+    # COCO classes that are weapons / threats (checked when weapon_detection_enabled=True)
+    # YOLOv8n/s trained on COCO doesn't include firearms — we use scissors/knife as
+    # proxy and treat any carried sharp object as a threat signal.
+    WEAPON_CLASSES = {
+        43: "knife",
+        76: "scissors",
+        # Add custom class IDs here if using a weapon-specific model
+    }
 
     # Confidence thresholds are now read from config.py so they can be
     # adjusted without touching pipeline code.
@@ -543,6 +631,12 @@ class Pipeline:
         )
         # DB write throttle: last flush time per identity (avoids write flood)
         self._db_last_flush: Dict[str, float] = {}
+
+        # ── Heavy-feature stride counter ──────────────────────────────────────
+        # Basic YOLO track runs every frame (smooth boxes).
+        # Expensive features (multiscale, reinference, pose, face) run only
+        # every `heavy_feature_stride` frames to cut GPU load ~66%.
+        self._frame_counter: int = 0
 
         # ── Optimization: Async AI Worker ──
         self.ai_queue = queue.Queue(maxsize=50)
@@ -601,8 +695,16 @@ class Pipeline:
 
         person_candidates, object_detections = self._parse_yolo_result(yolo, frame, camera_id, now)
 
-        # ── Smart Multi-Scale (gated by latency guard) ───────────────────────
-        if (config.multiscale_enabled
+        # ── Heavy feature stride gate ─────────────────────────────────────────
+        # Run expensive GPU features only every N frames to reduce GPU load.
+        # Between heavy frames: tracking stays smooth from basic YOLO above.
+        self._frame_counter += 1
+        _stride = max(1, getattr(config, 'heavy_feature_stride', 3))
+        _run_heavy = (self._frame_counter % _stride == 0)
+
+        # ── Smart Multi-Scale (gated by latency guard + stride) ───────────────
+        if (_run_heavy
+                and config.multiscale_enabled
                 and latency_guard.multiscale_allowed
                 and self._should_trigger_multiscale(person_candidates, frame.shape[:2])):
             with _inference_lock:
@@ -610,8 +712,9 @@ class Pipeline:
             if extra_ms:
                 person_candidates.extend(extra_ms)
 
-        # ── Small object re-inference (gated by latency guard) ───────────────
-        if (config.small_object_reinference
+        # ── Small object re-inference (gated by latency guard + stride) ───────
+        if (_run_heavy
+                and config.small_object_reinference
                 and latency_guard.reinference_allowed
                 and person_candidates):
             with _inference_lock:
@@ -630,8 +733,8 @@ class Pipeline:
         # ── Temporal confirmation + hold + EMA + velocity + quality scoring ──
         people = self._temporal_buffer.update(people_raw)
 
-        # ── Re-Detection on Track Loss (gated by latency guard) ──────────────
-        if config.redetection_on_loss_enabled and latency_guard.redetection_allowed:
+        # ── Re-Detection on Track Loss (gated by latency guard + stride) ───────
+        if _run_heavy and config.redetection_on_loss_enabled and latency_guard.redetection_allowed:
             with _inference_lock:
                 recovered = self._redetect_lost_tracks(inference_frame, people_raw, frame.shape[:2], camera_id, now)
             if recovered:
@@ -658,6 +761,7 @@ class Pipeline:
                 location,
                 frame,
                 object_links.get(person["global_id"], {}),
+                run_heavy=_run_heavy,
             )
             detections.append(det)
             person_ids.append(det["global_id"])
@@ -962,6 +1066,7 @@ class Pipeline:
         extra_people: List[Dict[str, Any]] = []
 
         for rx1, ry1, rx2, ry2 in merged:
+            rx1, ry1, rx2, ry2 = int(rx1), int(ry1), int(rx2), int(ry2)
             crop = frame[ry1:ry2, rx1:rx2]
             if crop.size == 0:
                 continue
@@ -1016,10 +1121,11 @@ class Pipeline:
     ) -> List[Tuple[int, int, int, int]]:
         """Merge overlapping rectangular regions to avoid redundant crops."""
         if len(regions) <= 1:
-            return regions
+            return [(int(x1), int(y1), int(x2), int(y2)) for x1, y1, x2, y2 in regions]
 
         merged: List[List[int]] = []
         for r in sorted(regions, key=lambda r: r[0]):
+            r = [int(v) for v in r]   # ensure ints before merging
             if merged and r[0] <= merged[-1][2] and r[1] <= merged[-1][3]:
                 # Overlapping — expand the last merged region
                 merged[-1][2] = max(merged[-1][2], r[2])
@@ -1027,9 +1133,9 @@ class Pipeline:
                 merged[-1][0] = min(merged[-1][0], r[0])
                 merged[-1][1] = min(merged[-1][1], r[1])
             else:
-                merged.append(list(r))
+                merged.append(r)
 
-        return [tuple(m) for m in merged]
+        return [tuple(m) for m in merged]  # type: ignore[return-value]
 
     def _should_trigger_multiscale(
         self,
@@ -1286,6 +1392,46 @@ class Pipeline:
                 kept.append(candidate)
         return sorted(kept, key=lambda p: p["bbox"][0])
 
+    def _match_known_face(self, face_crop: np.ndarray, global_id: str) -> Optional[str]:
+        """
+        Compare a face crop against images in config.known_faces_dir/<name>/
+        using HSV histogram correlation (~1 ms per known person, no extra libs).
+        Returns the best-matching name if similarity >= face_tolerance, else None.
+        """
+        import cv2  # local import — cv2 is not in the module-level namespace
+        import glob, os
+        try:
+            known_dir = getattr(config, "known_faces_dir", "data/known_faces")
+            if not os.path.isdir(known_dir):
+                return None
+            crop_r   = cv2.resize(face_crop, (64, 64))
+            crop_hsv = cv2.cvtColor(crop_r, cv2.COLOR_BGR2HSV)
+            h1       = cv2.calcHist([crop_hsv], [0, 1], None, [18, 16], [0, 180, 0, 256])
+            cv2.normalize(h1, h1)
+            best_name:  Optional[str] = None
+            best_score: float         = 0.0
+            threshold = getattr(config, "face_tolerance", 0.60)
+            for person_dir in os.scandir(known_dir):
+                if not person_dir.is_dir():
+                    continue
+                imgs = (glob.glob(os.path.join(person_dir.path, "*.jpg")) +
+                        glob.glob(os.path.join(person_dir.path, "*.png")))
+                for img_path in imgs:
+                    ref = cv2.imread(img_path)
+                    if ref is None:
+                        continue
+                    ref_hsv = cv2.cvtColor(cv2.resize(ref, (64, 64)), cv2.COLOR_BGR2HSV)
+                    h2      = cv2.calcHist([ref_hsv], [0, 1], None, [18, 16], [0, 180, 0, 256])
+                    cv2.normalize(h2, h2)
+                    score = float(cv2.compareHist(h1, h2, cv2.HISTCMP_CORREL))
+                    if score > best_score:
+                        best_score = score
+                        best_name  = person_dir.name
+            return best_name if best_score >= threshold else None
+        except Exception as e:
+            print(f"[Pipeline] _match_known_face error: {e}")
+            return None
+
     @staticmethod
     def _iou(a: BBox, b: BBox) -> float:
         ax1, ay1, ax2, ay2 = a
@@ -1321,6 +1467,7 @@ class Pipeline:
         location: Dict[str, float],
         frame: np.ndarray,
         object_links: Dict[str, Any],
+        run_heavy: bool = True,
     ) -> Tuple[Dict[str, Any], Optional[Dict[str, Any]]]:
         global_id = person["global_id"]
         x1, y1, x2, y2 = person["bbox"]
@@ -1420,6 +1567,52 @@ class Pipeline:
             })
             database.save_identity(self.identity_records[global_id])
 
+        # ── ① POSE / FALL DETECTION (MediaPipe — gated by heavy stride) ────────
+        pose_detail  = behaviour_label  # default: use behaviour classifier
+        fall_detected = False
+        if run_heavy and config.pose_enabled and pose_analyzer.available:
+            pose_result = pose_analyzer.analyze_pose(frame, (x1, y1, x2, y2))
+            if pose_result["confidence"] > 0:
+                pose_detail   = pose_result["activity"]
+                fall_detected = pose_result["fall_detected"]
+                if fall_detected:
+                    behaviour_label  = "falling"
+                    behaviour_score  = float(pose_result["confidence"]) * 100
+                    behaviour_alert  = "fall"
+
+        # ── ② WEAPON DETECTION (object proximity scan) ────────────────────
+        weapon_name: Optional[str] = None
+        if config.weapon_detection_enabled:
+            nearby = object_links.get("nearby_objects", [])
+            for obj_info in nearby:
+                # nearby_objects stores {class, confidence, bbox, distance}
+                # We stored class_name strings; check WEAPON_CLASSES names
+                obj_cls = obj_info.get("class", "")
+                if obj_cls in self.WEAPON_CLASSES.values():
+                    if obj_info.get("confidence", 0) >= config.weapon_confidence_threshold:
+                        weapon_name = obj_cls
+                        break
+            if weapon_name:
+                signals["weapon_nearby"] = True
+                risk = risk_engine.compute_risk(
+                    global_id, signals,
+                    behaviour_score=behaviour_score,
+                    avoidance_score=0.0,
+                )
+                alert_engine.create_alert(
+                    "weapon", global_id, camera_id,
+                    {"weapon_type": weapon_name}, frame
+                )
+
+        # ── ③ FACE RECOGNITION (gated by heavy stride) ──────────────────────
+        face_name: Optional[str] = None
+        if run_heavy and config.face_recognition_enabled and (y2 - y1) >= config.min_face_height_px:
+            face_y2 = y1 + max(1, int((y2 - y1) * 0.38))
+            face_crop = frame[max(0, y1):min(frame.shape[0], face_y2),
+                               max(0, x1):min(frame.shape[1], x2)]
+            if face_crop.size > 0:
+                face_name = self._match_known_face(face_crop, global_id)
+
         alert = None
         if behaviour_alert:
             alert = alert_engine.create_alert(behaviour_alert, global_id, camera_id, {
@@ -1427,11 +1620,16 @@ class Pipeline:
                 "speed_px_s": speed_px_s,
             }, frame)
 
+        metadata["pose_detail"]   = pose_detail
+        metadata["face_name"]     = face_name
+        metadata["weapon_nearby"] = weapon_name
+        self.identity_records[global_id]["face_name"] = face_name
+
         return {
             "global_id": global_id,
             "track_id": person["track_id"],
             "bbox": [x1, y1, x2, y2],
-            "display_name": global_id,
+            "display_name": face_name or global_id,
             "is_object": False,
             "object_class": "person",
             "object_category": "person",
@@ -1500,7 +1698,8 @@ class Pipeline:
 
         median_height = float(np.median([max(1.0, s[3]) for s in samples[-12:]]))
         body_lengths_per_s = state.speed_px_s / max(1.0, median_height)
-        if body_lengths_per_s >= 2.4:
+        run_threshold = getattr(config, "behaviour_running_body_lengths_per_s", 3.5)
+        if body_lengths_per_s >= run_threshold:
             return "running", min(80.0, 45.0 + body_lengths_per_s * 12.0), "sudden_movement"
 
         recent = np.array([(s[0], s[1]) for s in samples[-45:]], dtype=np.float32)

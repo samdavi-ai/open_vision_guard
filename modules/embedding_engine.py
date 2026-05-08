@@ -61,8 +61,8 @@ class EmbeddingEngine:
         ])
 
         # ── Multi-embedding gallery ───────────────────────────────────────────
-        # global_id  →  list of L2-normalised float32 embeddings (ndim=512)
-        self._gallery: Dict[str, List[np.ndarray]] = {}
+        # global_id  →  list of (L2-normalised float32 embedding, camera_id) tuples
+        self._gallery: Dict[str, List[tuple]] = {}
         self._gallery_lock = threading.RLock()
 
         # ── Legacy metadata store (for backward compat with identity router) ─
@@ -76,7 +76,7 @@ class EmbeddingEngine:
         # Track last gallery-update time per identity to rate-limit adds
         self._last_update_ts: Dict[str, float] = {}
 
-        print("[EmbeddingEngine] Ready (OSNet-AIN x1.0 + multi-gallery).")
+        print("[EmbeddingEngine] Ready (OSNet-AIN x1.0 + multi-gallery + cross-camera Re-ID).")
 
     # ──────────────────────────────────────────────────────────────────────────
     #  Model loading
@@ -168,9 +168,9 @@ class EmbeddingEngine:
     #  Gallery management
     # ──────────────────────────────────────────────────────────────────────────
 
-    def _add_to_gallery(self, global_id: str, embedding: np.ndarray, now: float) -> None:
+    def _add_to_gallery(self, global_id: str, embedding: np.ndarray, now: float, camera_id: str = "unknown") -> None:
         """
-        Add an embedding to this identity's gallery.
+        Add an embedding to this identity's gallery, tagged with the source camera.
 
         Rules:
           - Skip if last update was <reid_min_update_interval_s ago (rate-limit).
@@ -186,62 +186,102 @@ class EmbeddingEngine:
 
         with self._gallery_lock:
             gallery = self._gallery.setdefault(global_id, [])
-            # Near-duplicate check
-            for existing in gallery:
-                sim = float(np.dot(flat, existing.flatten()))
+            # Near-duplicate check (compare only the embedding vector, not camera tag)
+            for emb_vec, _cam in gallery:
+                sim = float(np.dot(flat, emb_vec.flatten()))
                 if sim > 0.97:
                     return                        # Already have a very similar embedding
 
             max_size = getattr(config, "reid_max_gallery_size", 8)
             if len(gallery) >= max_size:
                 gallery.pop(0)                    # FIFO eviction
-            gallery.append(flat.copy())
+            gallery.append((flat.copy(), camera_id))
 
         self._last_update_ts[global_id] = now
 
-    def _match_gallery(self, query: np.ndarray) -> Tuple[Optional[str], float]:
+    def _match_gallery(self, query: np.ndarray, query_camera: str = "unknown") -> Tuple[Optional[str], float, bool]:
         """
         Match query embedding against every gallery entry of every known identity.
-        Returns (best_global_id, best_similarity).
+        Returns (best_global_id, best_similarity, is_cross_camera).
 
         Uses max-similarity voting: the per-identity score is the HIGHEST
         similarity among all of that identity's gallery embeddings.
-        This is specifically designed to handle appearance changes (bag removed etc.)
-        because at least ONE gallery entry should still match well.
+        Records whether the best match came from a different camera so the
+        caller can apply the appropriate (lenient) threshold.
         """
         flat = query.flatten()
         best_id: Optional[str] = None
         best_score: float = 0.0
+        best_cross_camera: bool = False
 
         with self._gallery_lock:
-            for gid, embeddings in self._gallery.items():
-                for emb in embeddings:
-                    sim = float(np.dot(flat, emb))   # cosine (both L2-normed)
+            for gid, entries in self._gallery.items():
+                for emb_vec, src_cam in entries:
+                    sim = float(np.dot(flat, emb_vec.flatten()))   # cosine (both L2-normed)
                     if sim > best_score:
-                        best_id, best_score = gid, sim
+                        best_id = gid
+                        best_score = sim
+                        best_cross_camera = (src_cam != query_camera and src_cam != "unknown")
 
-        return best_id, best_score
+        return best_id, best_score, best_cross_camera
 
     # ──────────────────────────────────────────────────────────────────────────
     #  Public API (backward compatible with pipeline.py)
     # ──────────────────────────────────────────────────────────────────────────
 
-    def get_or_create_identity(self, crop_img: np.ndarray) -> str:
+    def get_or_create_identity(self, crop_img: np.ndarray, camera_id: str = "unknown",
+                               spatiotemporal_hint: Optional[str] = None) -> str:
         """
         Match a crop against the gallery, or mint a new identity.
-        This is the main Re-ID entry point called from the async AI worker.
+
+        Args:
+            crop_img:              Person crop image (BGR ndarray).
+            camera_id:             Source camera ID (for cross-camera threshold selection).
+            spatiotemporal_hint:   If the pipeline detected a recently-lost track nearby,
+                                   pass its global_id here. The engine will try to match
+                                   against it first using the lenient cross_view threshold,
+                                   handling the back-view → front-view identity problem.
         """
         import time as _time
         now = _time.time()
 
         new_embedding = self.generate_embedding(crop_img)
-        threshold = getattr(config, "similarity_threshold", 0.72)
 
-        best_id, best_score = self._match_gallery(new_embedding)
+        same_cam_threshold   = getattr(config, "similarity_threshold",          0.80)
+        cross_cam_threshold  = getattr(config, "cross_camera_reid_threshold",   0.72)
+        cross_view_threshold = getattr(config, "cross_view_reid_threshold",     0.62)
+
+        # ── Step 1: Spatio-temporal hint (back→front view matching) ─────────
+        # If the pipeline says "this new track appeared where Person_X just was",
+        # check the embedding similarity against that specific identity using the
+        # most lenient cross_view_reid_threshold. This handles the common case of
+        # a person entering back-first and leaving front-first.
+        if spatiotemporal_hint and spatiotemporal_hint in self._gallery:
+            flat = new_embedding.flatten()
+            with self._gallery_lock:
+                hint_entries = self._gallery.get(spatiotemporal_hint, [])
+            hint_score = max(
+                (float(np.dot(flat, emb_vec.flatten())) for emb_vec, _ in hint_entries),
+                default=0.0
+            )
+            if hint_score >= cross_view_threshold:
+                # Confirmed same person — add this new view angle to gallery
+                self._add_to_gallery(spatiotemporal_hint, new_embedding, now, camera_id)
+                if spatiotemporal_hint in self.global_to_metadata:
+                    self.global_to_metadata[spatiotemporal_hint]["last_seen_time"] = (
+                        datetime.datetime.now().astimezone().isoformat()
+                    )
+                print(f"[ReID] Spatio-temporal match: {spatiotemporal_hint} "
+                      f"(score={hint_score:.3f} >= cross_view={cross_view_threshold})")
+                return spatiotemporal_hint
+
+        # ── Step 2: Standard gallery scan ────────────────────────────────────
+        best_id, best_score, is_cross = self._match_gallery(new_embedding, camera_id)
+        threshold = cross_cam_threshold if is_cross else same_cam_threshold
 
         if best_id is not None and best_score >= threshold:
             # Matched existing identity — update gallery with new appearance
-            self._add_to_gallery(best_id, new_embedding, now)
+            self._add_to_gallery(best_id, new_embedding, now, camera_id)
             if best_id in self.global_to_metadata:
                 self.global_to_metadata[best_id]["last_seen_time"] = (
                     datetime.datetime.now().astimezone().isoformat()
@@ -255,9 +295,9 @@ class EmbeddingEngine:
         new_global_id = f"Person_OSN_{self._faiss_id_counter:03d}"
         self._faiss_id_counter += 1
 
-        # Seed gallery with first embedding
+        # Seed gallery with first embedding (tagged with originating camera)
         with self._gallery_lock:
-            self._gallery[new_global_id] = [new_embedding.flatten().copy()]
+            self._gallery[new_global_id] = [(new_embedding.flatten().copy(), camera_id)]
         self._last_update_ts[new_global_id] = now
 
         # Also add to FAISS for bulk search (search_similar)

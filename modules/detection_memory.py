@@ -37,6 +37,13 @@ class DetectionMemory:
         # global_id → {det, expire_at, velocity, last_ts}
         self._store: Dict[str, Dict[str, Any]] = {}
 
+    def set_ttl_seconds(self, seconds: float) -> None:
+        """Dynamically update the TTL. Call each frame to adapt to AI latency.
+        Only updates if the new value is meaningfully different (> 10% change)
+        to avoid constant dict walks."""
+        if abs(seconds - self._ttl_seconds) / max(0.001, self._ttl_seconds) > 0.1:
+            self._ttl_seconds = max(0.5, seconds)
+
     # ─────────────────────────────────────────────────── public API ──────
 
     def update(self, detections: List[Dict[str, Any]]) -> None:

@@ -176,14 +176,25 @@ class OpenVisionConfig:
     dedup_overlap_threshold: float = 0.60
 
     # ── Embedding / Re-ID (OSNet-AIN + multi-gallery) ────────────────────────
-    # Raised to 0.82 as recommended for the OSNet-AIN model precision.
-    # Prevents "identity jumping" by ensuring high confidence in Re-ID matches.
-    similarity_threshold: float = 0.82
-    embedding_model: str = "osnet_ain_x1_0"       # updated from mobilenet_v2
-    # Gallery: max appearance snapshots stored per identity (FIFO eviction)
-    reid_max_gallery_size: int = 8
-    # Min seconds between gallery updates for the same identity
-    reid_min_update_interval_s: float = 3.0
+    # Within-camera, same-view threshold: strict.
+    similarity_threshold: float = 0.80
+    embedding_model: str = "osnet_ain_x1_0"
+    # Cross-camera threshold: more lenient (different angle/crop size).
+    cross_camera_reid_threshold: float = 0.72
+    # Cross-view threshold: most lenient — same camera but person turned around
+    # (back view → front view). OSNet-AIN embedding drift on view change ~0.15.
+    # Used only when spatio-temporal proximity strongly suggests same person.
+    cross_view_reid_threshold: float = 0.62
+    # Gallery: max appearance snapshots stored per identity (FIFO eviction).
+    # Higher = more view angles stored → better cross-view matching.
+    reid_max_gallery_size: int = 12
+    # Min seconds between gallery updates for the same identity.
+    reid_min_update_interval_s: float = 2.0
+    # Spatio-temporal Re-ID: when a NEW track appears within this window
+    # after a track loss, and within max_px of the last known position,
+    # apply the cross_view threshold instead of minting a new identity.
+    spatiotemporal_reid_window_s: float = 5.0
+    spatiotemporal_reid_max_px:   float = 200.0
     face_recognition_enabled: bool = False
     face_tolerance: float = 0.5
     min_face_height_px: int = 80
@@ -201,6 +212,15 @@ class OpenVisionConfig:
 
     # ── Alerts ────────────────────────────────────────────────────────────────
     alert_dedup_window_seconds: int = 60
+    # Per-alert-type deduplication overrides (seconds).
+    # Sudden movement is a continuous classifier — without a long cooldown it
+    # floods the feed every frame a person is running.
+    alert_dedup_overrides: dict = {
+        "sudden_movement":  300,   # 5 minutes — one alert per person per run episode
+        "loitering":        120,   # 2 minutes between loitering re-alerts
+        "camera_avoidance": 180,   # 3 minutes
+        "high_risk":        240,   # 4 minutes
+    }
 
     # ── Session / Baggage Tracking ────────────────────────────────────────────
     # Seconds of absence before a person is considered to have "exited" the scene
@@ -236,9 +256,19 @@ class OpenVisionConfig:
     behaviour_running_speed_px: float = 150.0
     behaviour_walking_speed_px: float = 30.0
     behaviour_loitering_radius_px: float = 50.0
+    # Minimum body-lengths-per-second to classify as "running" (triggers sudden_movement).
+    # 2.4 = too sensitive (brisk mall walkers). 3.5 ≈ genuine jogging/sprinting.
+    behaviour_running_body_lengths_per_s: float = 3.5
     behaviour_loitering_time_s: float = 30.0
     # CLAHE: only enhance when scene is dark (brightness below this)
     clahe_brightness_gate: float = 100.0   # 0-255; skip CLAHE above this
+
+    # Heavy-feature stride: run multiscale/reinference/pose/face/redetection only
+    # every N frames. Basic YOLO track still runs every frame for smooth boxes.
+    # 1 = every frame (max quality, slowest)
+    # 3 = every 3rd frame (good quality, ~3× faster for heavy ops)  ← default
+    # 5 = every 5th frame (basic, fastest — use for 4+ cameras with all settings on)
+    heavy_feature_stride: int = 3
 
 # Global config instance
 config = OpenVisionConfig()
