@@ -1,4 +1,4 @@
-﻿"""Accuracy-improved live-surveillance pipeline for OpenVisionGuard.
+"""Accuracy-improved live-surveillance pipeline for OpenVisionGuard.
 
 Key improvements over the previous version:
   1. CLAHE frame preprocessing  — boosts low-light detection significantly.
@@ -43,6 +43,7 @@ from modules.embedding_engine import embedding_engine
 from modules.pose_analyzer import pose_analyzer
 from modules.behaviour_analyzer import behaviour_analyzer
 from modules.session_tracker import session_tracker, BaggageEvent
+from modules.sensor_fusion import get_fusion_layer
 import queue
 import threading
 
@@ -544,6 +545,12 @@ class Pipeline:
         # DB write throttle: last flush time per identity (avoids write flood)
         self._db_last_flush: Dict[str, float] = {}
 
+        # ── Heavy-feature stride counter ──────────────────────────────────────
+        # Basic YOLO track runs every frame (smooth boxes).
+        # Expensive features (multiscale, reinference, pose, face) run only
+        # every `heavy_feature_stride` frames to cut GPU load ~66%.
+        self._frame_counter: int = 0
+
         # ── Optimization: Async AI Worker ──
         self.ai_queue = queue.Queue(maxsize=50)
         self.heavy_ai_results: Dict[str, Dict[str, Any]] = {}  # global_id -> {embedding, behaviour, last_update}
@@ -601,8 +608,15 @@ class Pipeline:
 
         person_candidates, object_detections = self._parse_yolo_result(yolo, frame, camera_id, now)
 
-        # ── Smart Multi-Scale (gated by latency guard) ───────────────────────
-        if (config.multiscale_enabled
+        # ── Heavy feature stride gate ─────────────────────────────────────────
+        # Run expensive GPU features only every N frames to reduce GPU load.
+        self._frame_counter += 1
+        _stride = max(1, getattr(config, 'heavy_feature_stride', 3))
+        _run_heavy = (self._frame_counter % _stride == 0)
+
+        # ── Smart Multi-Scale (gated by latency guard + stride) ───────────────
+        if (_run_heavy
+                and config.multiscale_enabled
                 and latency_guard.multiscale_allowed
                 and self._should_trigger_multiscale(person_candidates, frame.shape[:2])):
             with _inference_lock:
@@ -610,8 +624,9 @@ class Pipeline:
             if extra_ms:
                 person_candidates.extend(extra_ms)
 
-        # ── Small object re-inference (gated by latency guard) ───────────────
-        if (config.small_object_reinference
+        # ── Small object re-inference (gated by latency guard + stride) ───────
+        if (_run_heavy
+                and config.small_object_reinference
                 and latency_guard.reinference_allowed
                 and person_candidates):
             with _inference_lock:
@@ -630,8 +645,8 @@ class Pipeline:
         # ── Temporal confirmation + hold + EMA + velocity + quality scoring ──
         people = self._temporal_buffer.update(people_raw)
 
-        # ── Re-Detection on Track Loss (gated by latency guard) ──────────────
-        if config.redetection_on_loss_enabled and latency_guard.redetection_allowed:
+        # ── Re-Detection on Track Loss (gated by latency guard + stride) ───────
+        if _run_heavy and config.redetection_on_loss_enabled and latency_guard.redetection_allowed:
             with _inference_lock:
                 recovered = self._redetect_lost_tracks(inference_frame, people_raw, frame.shape[:2], camera_id, now)
             if recovered:
@@ -648,6 +663,7 @@ class Pipeline:
         alerts: List[Dict[str, Any]] = []
         person_ids: List[str] = []
         person_positions: Dict[str, Tuple[float, float]] = {}
+        person_bboxes: Dict[str, Tuple[int, int, int, int]] = {}
 
         for person in people:
             det, alert = self._build_person_detection(
@@ -663,13 +679,14 @@ class Pipeline:
             person_ids.append(det["global_id"])
             x1, y1, x2, y2 = det["bbox"]
             person_positions[det["global_id"]] = ((x1 + x2) / 2.0, (y1 + y2) / 2.0)
+            person_bboxes[det["global_id"]] = (int(x1), int(y1), int(x2), int(y2))
             if alert:
                 alerts.append(alert)
 
         object_payloads = self._build_object_detections(object_detections, now_iso, location)
         detections.extend(object_payloads)
 
-        luggage_events = self._update_luggage(object_detections, person_positions, now, camera_id, frame)
+        luggage_events = self._update_luggage(object_detections, person_positions, person_bboxes, now, camera_id, frame)
         alerts.extend(luggage_events)
 
         # ── Session Tracker: entry/exit baggage-change detection ────────────
@@ -1578,24 +1595,44 @@ class Pipeline:
         self,
         objects: List[Dict[str, Any]],
         person_positions: Dict[str, Tuple[float, float]],
+        person_bboxes: Dict[str, Tuple[int, int, int, int]],
         now: float,
         camera_id: str,
         frame: np.ndarray,
     ) -> List[Dict[str, Any]]:
-        object_detections = []
+        # ── 1. Filter for luggage classes ───────────────────────────────────
+        raw_luggage = []
         for obj in objects:
             if obj["class_id"] not in self.LUGGAGE_CLASSES:
                 continue
-            object_detections.append({
-                "type": self.LUGGAGE_CLASSES[obj["class_id"]],
-                "center": obj["center"],
-                "bbox": obj["bbox"],
-            })
+            # Add camera_id for the fusion layer
+            obj["camera_id"] = camera_id
+            raw_luggage.append(obj)
 
-        if not object_detections:
+        if not raw_luggage:
             return []
 
-        result = luggage_tracker.update(object_detections, person_positions, now)
+        # ── 2. Run Sensor Fusion (World Alignment + Re-ID Stability) ────────
+        # This sits between raw YOLO and the state machine.
+        # It ensures that even if YOLO track_id flickers, global_track_id stays stable.
+        fusion = get_fusion_layer()
+        fused = fusion.fuse(raw_luggage, {camera_id: frame})
+
+        # ── 3. Convert FusedDetection to LuggageTracker format ──────────────
+        tracker_input = []
+        for fd in fused:
+            d = fd.to_dict()
+            tracker_input.append({
+                "track_id": d["global_track_id"], # USE STABLE FUSED ID
+                "class_id": d["class_id"],
+                "class_name": d["class_name"],
+                "center": d["center"],
+                "bbox": d["bbox"],
+                "confidence": d["confidence"],
+            })
+
+        # ── 4. Feed the Airport State Machine ───────────────────────────────
+        result = luggage_tracker.update(tracker_input, person_positions, person_bboxes, camera_id, now)
         alerts = []
         for event in result.get("events", []):
             owner = event.get("owner_id") or event.get("new_holder") or "Unknown"

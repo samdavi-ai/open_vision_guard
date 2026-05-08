@@ -1,4 +1,4 @@
-﻿"""
+"""
 Airport-Grade Luggage Intelligence Tracker
 ==========================================
 
@@ -178,8 +178,8 @@ class AirportLuggageTracker:
     """
 
     def __init__(self) -> None:
-        # track_id (int) → BagRecord
-        self._bags: Dict[int, BagRecord] = {}
+        # track_id (str) → BagRecord
+        self._bags: Dict[str, BagRecord] = {}
 
         # Thresholds (resolved lazily from config so live config edits work)
         self._carry_ratio: float      = getattr(config, "luggage_carry_distance_ratio", 0.60)
@@ -197,7 +197,7 @@ class AirportLuggageTracker:
         self,
         object_detections: List[Dict[str, Any]],
         person_positions: Dict[str, Tuple[float, float]],   # global_id → (cx, cy)
-        person_bboxes: Dict[str, Tuple[int, int, int, int]],# global_id → (x1,y1,x2,y2)
+        person_bboxes: Dict[str, Tuple[int, int, int, int]], # global_id → (x1,y1,x2,y2)
         camera_id: str,
         now: float,
     ) -> List[LuggageEvent]:
@@ -218,17 +218,16 @@ class AirportLuggageTracker:
             Current unix timestamp (time.time()).
         """
         events: List[LuggageEvent] = []
-        seen_track_ids: Set[int] = set()
+        seen_track_ids: Set[str] = set()
 
         for obj in object_detections:
             track_id = obj.get("track_id")
             if track_id is None:
-                # Objects without track IDs cannot be reliably followed
                 continue
 
-            track_id = int(track_id)
+            track_id = str(track_id)
             seen_track_ids.add(track_id)
-            bag_id = f"Bag_{track_id}"
+            bag_id = track_id   # already prefixed with "BAG-" from fusion layer
             cx, cy = obj["center"]
             class_id = obj["class_id"]
             class_name = obj["class_name"]
@@ -654,7 +653,7 @@ class AirportLuggageTracker:
 
         return None
 
-    def _cleanup(self, seen_track_ids: Set[int], now: float) -> None:
+    def _cleanup(self, seen_track_ids: Set[str], now: float) -> None:
         stale = [
             tid for tid, bag in self._bags.items()
             if tid not in seen_track_ids and (now - bag.last_seen_time) > self._stale_s
